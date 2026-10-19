@@ -16,6 +16,13 @@ A feature-packed desktop work log, shift tracker, and team reporting tool built 
 * **📂 Bulk Data Tools**:
   * **Bulk Paste**: Paste unstructured text logs and auto-extract task titles and durations.
   * **Import Excel**: Bulk import existing tasks from external Excel files with visual column mapping.
+* **💬 LAN Team Chat (Same Wi-Fi Network)**:
+  * **Zero-Config Peer Discovery**: Automatically detects all colleagues running WorkPulse on the same Wi-Fi / local network via UDP broadcast (no cloud server or external setup required).
+  * **Real-Time Instant Messaging**: Private, high-speed team chat that stays strictly within your local network.
+  * **Live Colleague Presence & Status**: Real-time presence sidebar with status choices (🟢 Available, 🟡 Focus Mode, 🍱 Lunch Break, ☕ Tea Break, 🔴 In Meeting).
+  * **One-Click "Share Today's Tasks"**: Instantly broadcast your today's task log and shift summary into the team chat.
+  * **Manual IP Connect Fallback**: "Add Colleague IP" tool to connect across restricted corporate Wi-Fi or isolated subnets.
+  * **Persistent Local History**: Chat history saved locally with instant clear and unread notification badges.
 * **🏖️ Holidays & Weekends**: Auto-marks weekly offs (custom days, 2nd & 4th Saturdays) and official company/national holidays.
 
 ---

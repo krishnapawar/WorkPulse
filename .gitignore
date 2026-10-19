@@ -36,6 +36,7 @@ ENV/
 *.swp
 *.swo
 
-# Temporary / logs
+# Temporary / logs / chat history
 *.log
+chat_history.json
 scratch/

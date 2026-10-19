@@ -17,6 +17,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
+from lan_chat import LANChatEngine, LANChatDialog
 
 def open_file_externally(filepath):
     """Open a file with the default system application across Windows, macOS, and Linux."""
@@ -134,7 +135,9 @@ DEFAULT_SETTINGS = {
     "data_api_token": "",
     "data_api_sync_on_edit": True,
     "data_api_sync_on_create": True,
-    "data_api_sync_on_delete": True
+    "data_api_sync_on_delete": True,
+    "lan_chat_enabled": True,
+    "lan_chat_port": 45454
 }
 
 # ---------- Settings Management ----------
@@ -173,6 +176,10 @@ def load_settings():
         merged["data_api_sync_on_create"] = True
     if "data_api_sync_on_delete" not in merged:
         merged["data_api_sync_on_delete"] = True
+    if "lan_chat_enabled" not in merged:
+        merged["lan_chat_enabled"] = True
+    if "lan_chat_port" not in merged:
+        merged["lan_chat_port"] = 45454
     return merged
 
 def save_settings(settings_data):
@@ -2189,9 +2196,10 @@ class ShareTeamDialog(tk.Toplevel):
 
 # ---------- Settings Dialog ----------
 class SettingsDialog(tk.Toplevel):
-    def __init__(self, parent):
+    def __init__(self, parent, app_ref=None):
         super().__init__(parent)
         self.parent = parent
+        self.app_ref = app_ref
         self.title("⚙️ Work Logger Settings & Shift Configuration")
         self.configure(bg="#f8fafc")
         self.transient(parent)
@@ -2608,6 +2616,9 @@ class SettingsDialog(tk.Toplevel):
             "data_api_sync_on_delete": self.var_api_sync_on_delete.get() if hasattr(self, 'var_api_sync_on_delete') else True
         })
         save_settings(self.settings)
+
+        if hasattr(self, 'app_ref') and self.app_ref and hasattr(self.app_ref, 'lan_engine') and self.app_ref.lan_engine:
+            self.app_ref.lan_engine.update_profile(self.settings.get("user_name", "Developer"))
 
         if hasattr(self.parent, 'current_selected_month'):
             s_name = self.parent.current_selected_month.get()
@@ -5084,6 +5095,25 @@ class TodayWorkUpdateApp:
         self.search_var = tk.StringVar()
         self.filter_status_var = tk.StringVar(value="All Statuses")
 
+        # LAN Team Chat System initialization
+        self.root.app_instance = self
+        self.settings = load_settings()
+        self.unread_lan_messages = 0
+        self.chat_dialog = None
+        self.lan_engine = LANChatEngine(
+            user_name=self.settings.get("user_name", "Developer"),
+            port=self.settings.get("lan_chat_port", 45454),
+            on_message=self._handle_background_lan_message,
+            on_peers_change=self._handle_lan_peers_change
+        )
+        try:
+            self.lan_engine.start()
+        except Exception as e:
+            print(f"Error starting LAN Chat Engine: {e}")
+
+        # Ensure graceful shutdown on window close
+        self.root.protocol("WM_DELETE_WINDOW", self.on_app_closing)
+
         # Initialize File and verify schema
         init_file()
 
@@ -5134,6 +5164,9 @@ class TodayWorkUpdateApp:
         btn_share = tk.Button(r1, text="📢 Share with Team", font=("Segoe UI", 8, "bold"), bg="#8b5cf6", fg="white", activebackground="#7c3aed", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.share_current_view_with_team)
         btn_share.pack(side=tk.LEFT, padx=2)
 
+        self.btn_chat = tk.Button(r1, text="💬 LAN Chat", font=("Segoe UI", 8, "bold"), bg="#4f46e5", fg="white", activebackground="#4338ca", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_lan_chat)
+        self.btn_chat.pack(side=tk.LEFT, padx=2)
+
         btn_import_excel = tk.Button(r1, text="📂 Import Excel", font=("Segoe UI", 8, "bold"), bg="#059669", fg="white", activebackground="#047857", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_excel_bulk_import_dialog)
         btn_import_excel.pack(side=tk.LEFT, padx=2)
 
@@ -5178,6 +5211,10 @@ class TodayWorkUpdateApp:
 
         self.lbl_stat_leaves = tk.Label(self.stats_frame, text="🌴 Leaves: 0", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#be185d")
         self.lbl_stat_leaves.pack(side=tk.LEFT, padx=12, pady=7)
+
+        self.lbl_stat_lan = tk.Label(self.stats_frame, text="💬 LAN: 0 online", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#4f46e5", cursor="hand2")
+        self.lbl_stat_lan.pack(side=tk.LEFT, padx=12, pady=7)
+        self.lbl_stat_lan.bind("<Button-1>", lambda e: self.open_lan_chat())
 
         # Shift summary on top right
         self.lbl_stat_shift = tk.Label(self.stats_frame, text="", font=("Segoe UI", 9, "bold"), bg="#e2e8f0", fg="#0369a1")
@@ -5705,7 +5742,68 @@ class TodayWorkUpdateApp:
         AddLeaveDialog(self.root, default_date=curr_d, on_success_callback=self.refresh_all)
 
     def open_settings(self):
-        SettingsDialog(self.root)
+        SettingsDialog(self.root, app_ref=self)
+
+    def open_lan_chat(self):
+        """Opens or brings to focus the LAN Team Chat dialog."""
+        self.unread_lan_messages = 0
+        if hasattr(self, 'btn_chat'):
+            self.btn_chat.config(text="💬 LAN Chat", bg="#4f46e5")
+
+        if self.chat_dialog and hasattr(self.chat_dialog, "dialog") and self.chat_dialog.dialog.winfo_exists():
+            try:
+                self.chat_dialog.dialog.deiconify()
+                self.chat_dialog.dialog.lift()
+                self.chat_dialog.dialog.focus_force()
+                return
+            except Exception:
+                pass
+
+        self.chat_dialog = LANChatDialog(self.root, self.lan_engine, self)
+
+    def _handle_background_lan_message(self, msg_obj):
+        """Called by LANChatEngine when a message arrives."""
+        is_dialog_open = bool(self.chat_dialog and hasattr(self.chat_dialog, "dialog") and self.chat_dialog.dialog.winfo_exists())
+        if not is_dialog_open and not msg_obj.get("is_me", False):
+            self.unread_lan_messages += 1
+            self.root.after(0, self._update_chat_button_badge)
+
+    def _update_chat_button_badge(self):
+        if hasattr(self, 'btn_chat'):
+            if self.unread_lan_messages > 0:
+                self.btn_chat.config(
+                    text=f"💬 LAN Chat ({self.unread_lan_messages})",
+                    bg="#ea580c"
+                )
+                try:
+                    self.root.bell()
+                except Exception:
+                    pass
+            else:
+                self.btn_chat.config(text="💬 LAN Chat", bg="#4f46e5")
+
+    def _handle_lan_peers_change(self, peer_list):
+        """Updates main window LAN presence indicator."""
+        self.root.after(0, lambda: self._update_lan_status_label(peer_list))
+
+    def _update_lan_status_label(self, peer_list):
+        if hasattr(self, 'lbl_stat_lan'):
+            count = len(peer_list)
+            if count == 0:
+                self.lbl_stat_lan.config(text="💬 LAN: 0 online", fg="#64748b")
+            elif count == 1:
+                self.lbl_stat_lan.config(text=f"💬 LAN: 1 online ({peer_list[0]['user_name']})", fg="#059669")
+            else:
+                self.lbl_stat_lan.config(text=f"💬 LAN: {count} online", fg="#059669")
+
+    def on_app_closing(self):
+        """Gracefully stop background LAN chat and exit application."""
+        try:
+            if hasattr(self, 'lan_engine') and self.lan_engine:
+                self.lan_engine.stop()
+        except Exception:
+            pass
+        self.root.destroy()
 
     def open_sync_api_dialog(self):
         SyncApiDialog(self.root)
