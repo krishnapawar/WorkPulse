@@ -19,6 +19,7 @@ import time
 import uuid
 import socket
 import select
+import sqlite3
 import datetime
 import threading
 import collections
@@ -27,7 +28,8 @@ from tkinter import ttk, messagebox
 
 # Default port for WorkPulse LAN Chat
 DEFAULT_LAN_PORT = 45454
-CHAT_HISTORY_FILE = "chat_history.json"
+CHAT_DB_FILE = "chat_history.db"
+LEGACY_JSON_FILE = "chat_history.json"
 MAX_HISTORY_ITEMS = 500
 BEACON_INTERVAL = 3.0  # seconds between heartbeat broadcasts
 PEER_TIMEOUT = 10.0    # seconds before marking peer as offline
@@ -133,6 +135,232 @@ def get_network_info():
 
 
 # ==============================================================================
+# SQLite Chat Database Engine
+# ==============================================================================
+
+class ChatDatabase:
+    """
+    High-performance, persistent SQLite database storage for WorkPulse LAN chat.
+    Stores messages, work summaries, task breakdowns, timestamps, and metadata.
+    Thread-safe with WAL mode enabled.
+    """
+    def __init__(self, db_path=CHAT_DB_FILE):
+        self.db_path = db_path
+        self.lock = threading.Lock()
+        self._init_db()
+
+    def _get_connection(self):
+        conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+        try:
+            conn.execute("PRAGMA journal_mode=WAL;")
+            conn.execute("PRAGMA synchronous=NORMAL;")
+        except Exception:
+            pass
+        return conn
+
+    def _init_db(self):
+        with self.lock:
+            with self._get_connection() as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id TEXT PRIMARY KEY,
+                        type TEXT NOT NULL DEFAULT 'chat',
+                        sender_id TEXT,
+                        user_name TEXT,
+                        avatar_color TEXT,
+                        text TEXT,
+                        time_str TEXT,
+                        timestamp REAL,
+                        date_str TEXT,
+                        is_me INTEGER DEFAULT 0,
+                        title TEXT,
+                        tasks_json TEXT,
+                        shift_str TEXT,
+                        total_hours TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    );
+                """)
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_timestamp ON chat_messages(timestamp);")
+                conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_date ON chat_messages(date_str);")
+                conn.commit()
+
+            self._migrate_json_if_exists()
+
+    def _migrate_json_if_exists(self):
+        if os.path.exists(LEGACY_JSON_FILE):
+            try:
+                with open(LEGACY_JSON_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                if isinstance(data, list) and data:
+                    with self._get_connection() as conn:
+                        for m in data:
+                            self._insert_row(conn, m)
+                        conn.commit()
+                try:
+                    os.rename(LEGACY_JSON_FILE, LEGACY_JSON_FILE + ".bak")
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Chat migration warning: {e}")
+
+    def _insert_row(self, conn, m):
+        m_id = m.get("id") or uuid.uuid4().hex[:12]
+        m_type = m.get("type", "chat")
+        sender_id = m.get("sender_id", "")
+        user_name = m.get("user_name", "Colleague")
+        avatar_color = m.get("avatar_color", AVATAR_PALETTE[0])
+        text = m.get("text", "")
+        time_str = m.get("time_str", "")
+        timestamp = float(m.get("timestamp") or time.time())
+        date_str = m.get("date_str") or datetime.datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d")
+        is_me = 1 if m.get("is_me") else 0
+        title = m.get("title", "")
+        tasks = m.get("tasks", [])
+        tasks_json = json.dumps(tasks) if tasks else ""
+        shift_str = m.get("shift_str", "")
+        total_hours = str(m.get("total_hours", ""))
+
+        conn.execute("""
+            INSERT OR REPLACE INTO chat_messages (
+                id, type, sender_id, user_name, avatar_color, text, time_str,
+                timestamp, date_str, is_me, title, tasks_json, shift_str, total_hours
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            m_id, m_type, sender_id, user_name, avatar_color, text, time_str,
+            timestamp, date_str, is_me, title, tasks_json, shift_str, total_hours
+        ))
+
+    def save_message(self, msg_dict):
+        """Persists a message dictionary into SQLite."""
+        with self.lock:
+            try:
+                with self._get_connection() as conn:
+                    self._insert_row(conn, msg_dict)
+                    conn.commit()
+                return True
+            except Exception as e:
+                print(f"Error saving chat to SQLite: {e}")
+                return False
+
+    def load_recent_messages(self, limit=MAX_HISTORY_ITEMS):
+        """Loads last N messages from SQLite in chronological order."""
+        with self.lock:
+            try:
+                with self._get_connection() as conn:
+                    cursor = conn.execute("""
+                        SELECT id, type, sender_id, user_name, avatar_color, text,
+                               time_str, timestamp, date_str, is_me, title, tasks_json,
+                               shift_str, total_hours
+                        FROM (
+                            SELECT * FROM chat_messages ORDER BY timestamp DESC LIMIT ?
+                        ) ORDER BY timestamp ASC
+                    """, (limit,))
+                    rows = cursor.fetchall()
+                    result = []
+                    for r in rows:
+                        tasks = []
+                        if r["tasks_json"]:
+                            try:
+                                tasks = json.loads(r["tasks_json"])
+                            except Exception:
+                                tasks = []
+                        result.append({
+                            "v": 1,
+                            "id": r["id"],
+                            "type": r["type"],
+                            "sender_id": r["sender_id"],
+                            "user_name": r["user_name"],
+                            "avatar_color": r["avatar_color"],
+                            "text": r["text"],
+                            "time_str": r["time_str"],
+                            "timestamp": r["timestamp"],
+                            "date_str": r["date_str"],
+                            "is_me": bool(r["is_me"]),
+                            "title": r["title"],
+                            "tasks": tasks,
+                            "shift_str": r["shift_str"],
+                            "total_hours": r["total_hours"]
+                        })
+                    return result
+            except Exception as e:
+                print(f"Error loading chat from SQLite: {e}")
+                return []
+
+    def search_messages(self, query_str, limit=50):
+        """Searches message texts, user names, or task titles in SQLite."""
+        q = f"%{query_str.strip()}%"
+        with self.lock:
+            try:
+                with self._get_connection() as conn:
+                    cursor = conn.execute("""
+                        SELECT id, type, sender_id, user_name, avatar_color, text,
+                               time_str, timestamp, date_str, is_me, title, tasks_json,
+                               shift_str, total_hours
+                        FROM chat_messages
+                        WHERE text LIKE ? OR user_name LIKE ? OR title LIKE ?
+                        ORDER BY timestamp DESC LIMIT ?
+                    """, (q, q, q, limit))
+                    rows = cursor.fetchall()
+                    result = []
+                    for r in rows:
+                        tasks = []
+                        if r["tasks_json"]:
+                            try:
+                                tasks = json.loads(r["tasks_json"])
+                            except Exception:
+                                tasks = []
+                        result.append({
+                            "v": 1,
+                            "id": r["id"],
+                            "type": r["type"],
+                            "sender_id": r["sender_id"],
+                            "user_name": r["user_name"],
+                            "avatar_color": r["avatar_color"],
+                            "text": r["text"],
+                            "time_str": r["time_str"],
+                            "timestamp": r["timestamp"],
+                            "date_str": r["date_str"],
+                            "is_me": bool(r["is_me"]),
+                            "title": r["title"],
+                            "tasks": tasks,
+                            "shift_str": r["shift_str"],
+                            "total_hours": r["total_hours"]
+                        })
+                    return result
+            except Exception as e:
+                print(f"Error searching chat in SQLite: {e}")
+                return []
+
+    def get_message_count(self):
+        """Returns total message count stored in SQLite."""
+        with self.lock:
+            try:
+                with self._get_connection() as conn:
+                    cursor = conn.execute("SELECT COUNT(*) FROM chat_messages")
+                    row = cursor.fetchone()
+                    return row[0] if row else 0
+            except Exception:
+                return 0
+
+    def clear_all(self):
+        """Deletes all messages from SQLite database."""
+        with self.lock:
+            try:
+                with self._get_connection() as conn:
+                    conn.execute("DELETE FROM chat_messages;")
+                    conn.commit()
+                    try:
+                        conn.execute("VACUUM;")
+                    except Exception:
+                        pass
+                return True
+            except Exception as e:
+                print(f"Error clearing SQLite: {e}")
+                return False
+
+
+# ==============================================================================
 # LAN Chat Networking Engine
 # ==============================================================================
 
@@ -171,7 +399,8 @@ class LANChatEngine:
         self.cleanup_thread = None
         self.lock = threading.Lock()
 
-        # Load persisted messages
+        # SQLite Chat Database
+        self.db = ChatDatabase(CHAT_DB_FILE)
         self.messages = []
         self.load_history()
 
@@ -373,33 +602,25 @@ class LANChatEngine:
             return sorted(self.peers.values(), key=lambda p: p["user_name"].lower())
 
     def clear_history(self):
-        """Empties message history."""
+        """Empties message history from memory and SQLite database."""
         with self.lock:
             self.messages = []
-            try:
-                if os.path.exists(CHAT_HISTORY_FILE):
-                    os.remove(CHAT_HISTORY_FILE)
-            except Exception:
-                pass
+            self.db.clear_all()
 
     def load_history(self):
-        """Loads previous chat history from local disk."""
-        if os.path.exists(CHAT_HISTORY_FILE):
-            try:
-                with open(CHAT_HISTORY_FILE, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                    if isinstance(data, list):
-                        self.messages = data[-MAX_HISTORY_ITEMS:]
-            except Exception:
-                self.messages = []
+        """Loads previous chat history from SQLite database."""
+        self.messages = self.db.load_recent_messages(limit=MAX_HISTORY_ITEMS)
 
-    def save_history(self):
-        """Persists chat history to local disk."""
-        try:
-            with open(CHAT_HISTORY_FILE, "w", encoding="utf-8") as f:
-                json.dump(self.messages[-MAX_HISTORY_ITEMS:], f, indent=2, ensure_ascii=False)
-        except Exception:
-            pass
+    def save_history(self, msg_obj=None):
+        """Persists chat history to SQLite database."""
+        if msg_obj:
+            self.db.save_message(msg_obj)
+        elif self.messages:
+            self.db.save_message(self.messages[-1])
+
+    def search_history(self, query, limit=50):
+        """Searches past chat messages in SQLite database."""
+        return self.db.search_messages(query, limit=limit)
 
     # ---------- Internal Socket & Protocol Helpers ----------
 
@@ -644,13 +865,13 @@ class LANChatDialog:
         # Responsive window sizing & auto-center
         center_window(self.dialog, parent, default_w=1020, default_h=680, min_w=820, min_h=520)
 
-        # Wire engine callbacks to this dialog
-        self.engine.on_message = self._on_engine_message
-        self.engine.on_peers_change = self._on_engine_peers_change
-
         self._build_header()
         self._build_body()
         self._populate_initial_data()
+
+        # Wire engine callbacks to this dialog only after all UI widgets exist
+        self.engine.on_message = self._on_engine_message
+        self.engine.on_peers_change = self._on_engine_peers_change
 
         # Keyboard shortcuts
         self.dialog.bind("<Escape>", lambda e: self.dialog.destroy())
@@ -679,6 +900,22 @@ class LANChatDialog:
         # Right Action Buttons (Pack RIGHT first so they are never clipped)
         right_box = tk.Frame(header, bg="#1e293b")
         right_box.pack(side=tk.RIGHT)
+
+        btn_search = tk.Button(
+            right_box,
+            text="🔍 Search",
+            font=("Segoe UI", 8, "bold"),
+            bg="#334155",
+            fg="#f8fafc",
+            activebackground="#475569",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=9,
+            pady=3,
+            cursor="hand2",
+            command=self._prompt_search_dialog
+        )
+        btn_search.pack(side=tk.LEFT, padx=2)
 
         btn_add_ip = tk.Button(
             right_box,
@@ -725,7 +962,7 @@ class LANChatDialog:
         )
         title_lbl.pack(anchor="w")
 
-        net_text = f"🟢 Local Subnet • IP: {self.engine.local_ip}:{self.engine.port} • Auto-Discovery: Active"
+        net_text = f"🟢 Local Subnet • IP: {self.engine.local_ip}:{self.engine.port} • 💾 SQLite DB Active"
         self.lbl_net_info = tk.Label(
             left_box,
             text=net_text,
@@ -1059,26 +1296,200 @@ class LANChatDialog:
         tk.Button(btn_box, text="Cancel", font=("Segoe UI", 9), bg="#475569", fg="white", relief="flat", padx=10, pady=3, command=prompt_win.destroy).pack(side=tk.RIGHT)
 
     def _clear_chat_history(self):
-        if messagebox.askyesno("Clear Chat History", "Are you sure you want to clear your local chat history?"):
+        if messagebox.askyesno("Clear Chat History", "Are you sure you want to clear your local chat history from SQLite?"):
             self.engine.clear_history()
             for widget in self.msg_inner.winfo_children():
                 widget.destroy()
+
+    def _prompt_search_dialog(self):
+        """Opens modal dialog to search SQLite chat history."""
+        search_win = tk.Toplevel(self.dialog)
+        search_win.title("🔍 Search LAN Chat History (SQLite)")
+        search_win.configure(bg="#0f172a")
+
+        center_window(search_win, self.dialog, default_w=580, default_h=480, min_w=480, min_h=360)
+
+        # Header
+        top_bar = tk.Frame(search_win, bg="#1e293b", padx=14, pady=8)
+        top_bar.pack(fill=tk.X)
+
+        tk.Label(
+            top_bar,
+            text="🔍 Search Chat History (SQLite)",
+            font=("Segoe UI", 11, "bold"),
+            fg="#ffffff",
+            bg="#1e293b"
+        ).pack(anchor="w")
+
+        total_count = self.engine.db.get_message_count()
+        lbl_info = tk.Label(
+            top_bar,
+            text=f"Indexed across {total_count} messages in {CHAT_DB_FILE}",
+            font=("Segoe UI", 8),
+            fg="#94a3b8",
+            bg="#1e293b"
+        )
+        lbl_info.pack(anchor="w", pady=(1, 0))
+
+        # Search Input
+        input_bar = tk.Frame(search_win, bg="#0f172a", padx=14, pady=8)
+        input_bar.pack(fill=tk.X)
+
+        e_search = tk.Entry(
+            input_bar,
+            font=("Segoe UI", 10),
+            bg="#1e293b",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            bd=6
+        )
+        e_search.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8))
+        e_search.focus_set()
+
+        # Results area
+        results_frame = tk.Frame(search_win, bg="#0f172a", padx=12, pady=4)
+        results_frame.pack(fill=tk.BOTH, expand=True)
+
+        res_canvas = tk.Canvas(results_frame, bg="#0f172a", highlightthickness=0)
+        res_scroll = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=res_canvas.yview)
+        res_inner = tk.Frame(res_canvas, bg="#0f172a")
+
+        res_canvas.configure(yscrollcommand=res_scroll.set)
+        res_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        res_canvas.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        res_win = res_canvas.create_window((0, 0), window=res_inner, anchor="nw")
+
+        def _on_inner_cfg(event):
+            res_canvas.configure(scrollregion=res_canvas.bbox("all"))
+        res_inner.bind("<Configure>", _on_inner_cfg)
+
+        def _on_canvas_cfg(event):
+            res_canvas.itemconfig(res_win, width=event.width)
+        res_canvas.bind("<Configure>", _on_canvas_cfg)
+
+        def _do_search(event=None):
+            query = e_search.get().strip()
+            for w in res_inner.winfo_children():
+                w.destroy()
+
+            if not query:
+                tk.Label(
+                    res_inner,
+                    text="Type any keyword above to search through your SQLite chat history.",
+                    font=("Segoe UI", 9),
+                    fg="#64748b",
+                    bg="#0f172a",
+                    wraplength=440
+                ).pack(anchor="w", padx=6, pady=20)
+                return
+
+            matches = self.engine.search_history(query, limit=50)
+            if not matches:
+                tk.Label(
+                    res_inner,
+                    text=f"No messages found matching '{query}'.",
+                    font=("Segoe UI", 9, "bold"),
+                    fg="#94a3b8",
+                    bg="#0f172a"
+                ).pack(pady=20)
+                return
+
+            tk.Label(
+                res_inner,
+                text=f"Found {len(matches)} matching message{'s' if len(matches) != 1 else ''}:",
+                font=("Segoe UI", 8, "bold"),
+                fg="#38bdf8",
+                bg="#0f172a"
+            ).pack(anchor="w", pady=(0, 6))
+
+            for m in matches:
+                card = tk.Frame(res_inner, bg="#1e293b", padx=10, pady=8, bd=1, relief="solid")
+                card.pack(fill=tk.X, pady=3)
+
+                header_f = tk.Frame(card, bg="#1e293b")
+                header_f.pack(fill=tk.X)
+
+                av = tk.Label(
+                    header_f,
+                    text=get_initials(m["user_name"]),
+                    font=("Segoe UI", 7, "bold"),
+                    fg="#ffffff",
+                    bg=m.get("avatar_color", AVATAR_PALETTE[0]),
+                    width=2,
+                    height=1
+                )
+                av.pack(side=tk.LEFT, padx=(0, 5))
+
+                tk.Label(
+                    header_f,
+                    text=m["user_name"],
+                    font=("Segoe UI", 8, "bold"),
+                    fg="#ffffff",
+                    bg="#1e293b"
+                ).pack(side=tk.LEFT)
+
+                date_part = m.get("date_str") or ""
+                time_part = m.get("time_str") or ""
+                tk.Label(
+                    header_f,
+                    text=f"{date_part} {time_part}",
+                    font=("Segoe UI", 7),
+                    fg="#64748b",
+                    bg="#1e293b"
+                ).pack(side=tk.RIGHT)
+
+                body_txt = m.get("text") or m.get("title") or "Work Update"
+                tk.Label(
+                    card,
+                    text=body_txt,
+                    font=("Segoe UI", 9),
+                    fg="#e2e8f0",
+                    bg="#1e293b",
+                    wraplength=540,
+                    justify="left"
+                ).pack(anchor="w", pady=(4, 0))
+
+        e_search.bind("<KeyRelease>", _do_search)
+        e_search.bind("<Return>", _do_search)
+
+        btn_find = tk.Button(
+            input_bar,
+            text="Search",
+            font=("Segoe UI", 9, "bold"),
+            bg="#2563eb",
+            fg="white",
+            relief="flat",
+            padx=12,
+            pady=4,
+            command=_do_search
+        )
+        btn_find.pack(side=tk.RIGHT)
+
+        # Initial prompt
+        _do_search()
 
     # ---------- Thread-Safe Engine Callback Handlers ----------
 
     def _on_engine_message(self, msg_obj):
         """Invoked by background socket thread when a message is received."""
-        # Schedule onto Tkinter UI main thread safely
+        if not hasattr(self, "msg_inner") or not hasattr(self, "dialog") or not self.dialog.winfo_exists():
+            return
         self.dialog.after(0, lambda: self._render_message_bubble(msg_obj, scroll=True))
 
     def _on_engine_peers_change(self, peer_list):
         """Invoked when peers join, leave, or change status."""
+        if not hasattr(self, "peers_inner") or not hasattr(self, "dialog") or not self.dialog.winfo_exists():
+            return
         self.dialog.after(0, lambda: self._refresh_peers_ui(peer_list))
 
     # ---------- Rendering Helpers ----------
 
     def _refresh_peers_ui(self, peers):
         """Rebuilds the online colleague cards in the left sidebar."""
+        if not hasattr(self, "peers_inner") or not hasattr(self, "dialog") or not self.dialog.winfo_exists():
+            return
         for widget in self.peers_inner.winfo_children():
             widget.destroy()
 
@@ -1160,6 +1571,8 @@ class LANChatDialog:
 
     def _render_message_bubble(self, msg, scroll=True):
         """Renders chat messages or work update cards into the message canvas."""
+        if not hasattr(self, "msg_inner") or not hasattr(self, "dialog") or not self.dialog.winfo_exists():
+            return
         m_type = msg.get("type", "chat")
         is_me = msg.get("is_me", False)
         sender = msg.get("user_name", "Colleague")

@@ -39,4 +39,9 @@ ENV/
 # Temporary / logs / chat history
 *.log
 chat_history.json
+chat_history.json.bak
+chat_history.db
+chat_history.db-wal
+chat_history.db-shm
+*.db
 scratch/

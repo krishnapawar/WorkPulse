@@ -22,7 +22,7 @@ A feature-packed desktop work log, shift tracker, and team reporting tool built 
   * **Live Colleague Presence & Status**: Real-time presence sidebar with status choices (🟢 Available, 🟡 Focus Mode, 🍱 Lunch Break, ☕ Tea Break, 🔴 In Meeting).
   * **One-Click "Share Today's Tasks"**: Instantly broadcast your today's task log and shift summary into the team chat.
   * **Manual IP Connect Fallback**: "Add Colleague IP" tool to connect across restricted corporate Wi-Fi or isolated subnets.
-  * **Persistent Local History**: Chat history saved locally with instant clear and unread notification badges.
+  * **Persistent SQLite Database Storage**: All messages, task logs, and shift cards are saved locally in an indexed SQLite database (`chat_history.db`) with thread-safe WAL mode and real-time history search (**🔍 Search**).
 * **🏖️ Holidays & Weekends**: Auto-marks weekly offs (custom days, 2nd & 4th Saturdays) and official company/national holidays.
 
 ---
