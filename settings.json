@@ -1,0 +1,231 @@
+{
+    "user_name": "Developer",
+    "webhook_url": "",
+    "webhook_type": "Microsoft Teams",
+    "auto_copy_on_save": true,
+    "prompt_team_share_on_save": true,
+    "default_login_time": "10:30 AM",
+    "default_logout_time": "07:30 PM",
+    "default_lunch_break": "02:15 PM - 03:00 PM",
+    "default_tea_break": "05:30 PM - 05:45 PM",
+    "weekend_mode": "Custom",
+    "second_fourth_saturday": false,
+    "weekly_offs": [
+        "Saturday",
+        "Sunday"
+    ],
+    "holidays": [
+        {
+            "date": "2026-01-26",
+            "name": "Republic Day"
+        },
+        {
+            "date": "2026-03-04",
+            "name": "Maha Shivratri"
+        },
+        {
+            "date": "2026-03-20",
+            "name": "Holi"
+        },
+        {
+            "date": "2026-03-21",
+            "name": "Id-ul-Fitr (Eid)"
+        },
+        {
+            "date": "2026-04-03",
+            "name": "Good Friday"
+        },
+        {
+            "date": "2026-04-14",
+            "name": "Dr. Ambedkar Jayanti"
+        },
+        {
+            "date": "2026-05-01",
+            "name": "Maharashtra Day / May Day"
+        },
+        {
+            "date": "2026-05-28",
+            "name": "Bakrid / Eid-al-Adha"
+        },
+        {
+            "date": "2026-08-15",
+            "name": "Independence Day"
+        },
+        {
+            "date": "2026-08-28",
+            "name": "Raksha Bandhan"
+        },
+        {
+            "date": "2026-09-04",
+            "name": "Janmashtami"
+        },
+        {
+            "date": "2026-09-15",
+            "name": "Milad-un-Nabi"
+        },
+        {
+            "date": "2026-10-20",
+            "name": "Dussehra (Vijayadashami)"
+        },
+        {
+            "date": "2026-11-08",
+            "name": "Diwali (Laxmi Pujan)"
+        },
+        {
+            "date": "2026-11-09",
+            "name": "Govardhan Puja / New Year"
+        },
+        {
+            "date": "2026-11-10",
+            "name": "Bhai Dooj"
+        },
+        {
+            "date": "2026-11-24",
+            "name": "Guru Nanak Jayanti"
+        },
+        {
+            "date": "2026-12-25",
+            "name": "Christmas"
+        }
+    ],
+    "auto_arrange_by_date": true,
+    "date_sort_order": "asc",
+    "auto_sync_weekends_holidays": true,
+    "highlight_weekends_holidays": true,
+    "daily_timings": {
+        "2026-10-12": {
+            "login": "10:34 AM",
+            "logout": "08:10 PM",
+            "lunch": "45 mins",
+            "tea": "",
+            "lunch_taken": true,
+            "tea_taken": false
+        },
+        "2026-10-06": {
+            "login": "10:30 AM",
+            "logout": "07:40 PM",
+            "lunch": "45 mins",
+            "tea": "15 mins",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-14": {
+            "login": "10:35 AM",
+            "logout": "08:00 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-15": {
+            "login": "10:35 AM",
+            "logout": "07:50 PM",
+            "lunch": "45 mins",
+            "tea": "15 mins",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-07": {
+            "login": "10:30 AM",
+            "logout": "07:55 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-13": {
+            "login": "10:34 AM",
+            "logout": "08:00 PM",
+            "lunch": "45 mins",
+            "tea": "15 mins",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-09": {
+            "login": "10:34 AM",
+            "logout": "07:50 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-08": {
+            "login": "10:34 AM",
+            "logout": "07:45 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-05": {
+            "login": "10:34 AM",
+            "logout": "07:55 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-04": {
+            "login": "10:30 AM",
+            "logout": "07:30 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-03": {
+            "login": "10:30 AM",
+            "logout": "07:30 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-02": {
+            "login": "10:30 AM",
+            "logout": "07:45 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-01": {
+            "login": "10:30 AM",
+            "logout": "08:15 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-20": {
+            "login": "10:00 AM",
+            "logout": "07:30 PM",
+            "lunch": "01:00 PM - 02:00 PM",
+            "tea": "04:30 PM - 04:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-21": {
+            "login": "10:00 AM",
+            "logout": "07:30 PM",
+            "lunch": "01:00 PM - 02:00 PM",
+            "tea": "04:30 PM - 04:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
+        },
+        "2026-10-16": {
+            "login": "10:30 AM",
+            "logout": "07:55 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "",
+            "lunch_taken": true,
+            "tea_taken": false
+        }
+    },
+    "recent_teammates": [],
+    "data_api_url": "http://127.0.0.1:8000/api/save-json",
+    "data_api_token": "",
+    "data_api_sync_on_edit": true,
+    "data_api_sync_on_create": true,
+    "data_api_sync_on_delete": true
+}

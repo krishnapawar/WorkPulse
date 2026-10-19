@@ -1,0 +1,2 @@
+# Requirements for Today Work Update Manager
+openpyxl>=3.1.0
