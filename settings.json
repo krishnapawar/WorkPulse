@@ -220,6 +220,14 @@
             "tea": "",
             "lunch_taken": true,
             "tea_taken": false
+        },
+        "2026-10-28": {
+            "login": "10:30 AM",
+            "logout": "07:30 PM",
+            "lunch": "02:15 PM - 03:00 PM",
+            "tea": "05:30 PM - 05:45 PM",
+            "lunch_taken": true,
+            "tea_taken": true
         }
     },
     "recent_teammates": [],
@@ -227,5 +235,10 @@
     "data_api_token": "",
     "data_api_sync_on_edit": true,
     "data_api_sync_on_create": true,
-    "data_api_sync_on_delete": true
+    "data_api_sync_on_delete": true,
+    "lan_chat_enabled": true,
+    "lan_chat_port": 45454,
+    "gsheet_webapp_url": "https://script.google.com/macros/s/AKfycbz8jozAw0xCM9FrKwhpizwlqaIeRV8YPklz2eHu-t6zuYR9O_Mlhkjtg28cIibc4S2r/exec",
+    "gsheet_auto_sync": true,
+    "gsheet_last_sync": "2026-10-28 01:19:48"
 }

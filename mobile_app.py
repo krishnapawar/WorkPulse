@@ -45,7 +45,7 @@ try:
         save_work_update, load_settings, save_settings,
         calculate_net_working_hours, format_human_time,
         get_daily_timings, save_daily_timings,
-        format_date_only, FILE
+        format_date_only, FILE, sync_google_sheet_month
     )
 except ImportError:
     pass
@@ -164,6 +164,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_copy.bind(on_release=self.copy_standup)
         row_extra.add_widget(btn_copy)
 
+        btn_sync = Button(
+            text="📊 Sync G-Sheet",
+            background_normal='',
+            background_color=get_color_from_hex("#0f9d58"),
+            color=(1, 1, 1, 1),
+            bold=True
+        )
+        btn_sync.bind(on_release=self.sync_gsheet)
+        row_extra.add_widget(btn_sync)
+
         btn_clear = Button(
             text="🧹 Clear",
             background_normal='',
@@ -185,6 +195,37 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.in_title.text = ""
         self.in_desc.text = ""
         self.in_hours.text = ""
+
+    def sync_gsheet(self, *args):
+        import threading
+        if 'sync_google_sheet_month' not in globals():
+            self.show_popup("Error", "Google Sheet sync module not loaded.")
+            return
+
+        settings = load_settings() if 'load_settings' in globals() else {}
+        url = settings.get("gsheet_webapp_url", "").strip()
+        if not url:
+            self.show_popup("Setup Required", "Please configure your Google Sheet Web App URL in settings.json.")
+            return
+
+        try:
+            date_str = self.in_date.text.strip()
+            dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            month_name = dt.strftime("%B %Y")
+        except Exception:
+            month_name = datetime.datetime.now().strftime("%B %Y")
+
+        def _do_sync():
+            ok, data, code = sync_google_sheet_month(month_name)
+            if ok:
+                cnt = data.get("updatedRows", "") if isinstance(data, dict) else ""
+                msg = f"Synced {cnt} rows to Google Sheet ('{month_name}') successfully!"
+                self.show_popup("Sync Complete", msg)
+            else:
+                msg = data if isinstance(data, str) else data.get("message", "Error")
+                self.show_popup("Sync Failed", f"Failed to sync: {msg}")
+
+        threading.Thread(target=_do_sync, daemon=True).start()
 
     def on_save(self, *args):
         date_v = self.in_date.text.strip()
@@ -208,6 +249,17 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 )
                 self.show_popup("Success", f"✅ Task saved to {FILE}!")
                 self.clear_form()
+
+                # Trigger background Google Sheet sync if auto_sync enabled
+                settings = load_settings() if 'load_settings' in globals() else {}
+                if settings.get("gsheet_auto_sync", False) and settings.get("gsheet_webapp_url"):
+                    import threading
+                    try:
+                        dt = datetime.datetime.strptime(date_v, "%Y-%m-%d")
+                        m_name = dt.strftime("%B %Y")
+                    except Exception:
+                        m_name = datetime.datetime.now().strftime("%B %Y")
+                    threading.Thread(target=lambda: sync_google_sheet_month(m_name), daemon=True).start()
             else:
                 self.show_popup("Saved", "Task update recorded!")
         except Exception as e:

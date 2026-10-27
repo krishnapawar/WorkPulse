@@ -76,7 +76,7 @@ echo "🚀 Running Buildozer (downloading Android SDK/NDK and compiling APK)..."
 echo "Note: The first build will take 10-15 minutes to download Android toolchains."
 echo ""
 
-buildozer android debug
+yes | buildozer android debug
 
 echo ""
 echo "=========================================================="

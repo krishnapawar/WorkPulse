@@ -51,3 +51,4 @@ chat_history.db-wal
 chat_history.db-shm
 *.db
 scratch/
+gkey.txt

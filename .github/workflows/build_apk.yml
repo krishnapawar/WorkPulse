@@ -49,10 +49,12 @@ jobs:
 
       - name: Build Android APK
         run: |
-          buildozer android debug
+          yes | buildozer android debug
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: WorkPulse-Android-APK
-          path: dist/*.apk
+          path: |
+            dist/*.apk
+            bin/*.apk

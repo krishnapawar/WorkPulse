@@ -24,6 +24,11 @@ A feature-packed desktop work log, shift tracker, and team reporting tool built 
   * **One-Click "Share Today's Tasks"**: Instantly broadcast your today's task log and shift summary into the team chat.
   * **Manual IP Connect Fallback**: "Add Colleague IP" tool to connect across restricted corporate Wi-Fi or isolated subnets.
   * **Persistent SQLite Database Storage**: All messages, task logs, and shift cards are saved locally in an indexed SQLite database (`chat_history.db`) with thread-safe WAL mode and real-time history search (**🔍 Search**).
+* **📊 Google Sheets Cloud Synchronization**:
+  * **1-Click Month & Bulk Sync**: Push your current month or all historical months into beautifully formatted tabs in your online Google Spreadsheet.
+  * **Automated Professional Styling**: Formats header rows (`#1F4E79` navy blue), highlights weekly offs (`#DBEAFE` soft blue), holidays (`#FEF3C7` amber), and completed badges (`#DCFCE7` green) with auto-fitted columns.
+  * **⚡ Real-Time Auto-Sync**: Automatically updates your Google Sheet tab in the background whenever a task is Added, Edited, or Deleted.
+  * **Zero Cloud Console Friction**: Powered by a lightweight Google Apps Script Web App (`google_apps_script.js`). No Google Cloud IAM projects or service accounts required—setup takes 30 seconds!
 * **🏖️ Holidays & Weekends**: Auto-marks weekly offs (custom days, 2nd & 4th Saturdays) and official company/national holidays.
 
 ---
@@ -270,6 +275,34 @@ Click **`🔄 Sync to API`** on the top header or **`🔄 Sync All to API`** on 
   "data": [ ... ]
 }
 ```
+
+---
+
+## 📊 Google Sheets Cloud Sync Setup (4 Quick Steps)
+
+WorkPulse includes built-in real-time synchronization with **Google Sheets**. It requires **no Google Cloud console setup, no API keys, and no service account files**!
+
+### Step 1: Open Your Google Sheet
+Open any new or existing spreadsheet at [sheets.google.com](https://sheets.google.com).
+
+### Step 2: Open Apps Script
+In the top menu, click **Extensions** → **Apps Script**.
+
+### Step 3: Paste WorkPulse Integration Code
+1. Erase any existing placeholder code in `Code.gs`.
+2. Copy the code from [google_apps_script.js](google_apps_script.js) (or click **"📋 Copy Google Apps Script Code"** in WorkPulse).
+3. Paste the code into the Apps Script editor and click the **Save** (💾) icon.
+
+### Step 4: Deploy as Web App
+1. Click **Deploy** (top right) → **New deployment**.
+2. Click the gear icon (⚙️) next to *Select type* and choose **Web app**.
+3. Set **Execute as**: `Me (<your email>)`.
+4. Set **Who has access**: `Anyone` *(Required so WorkPulse can send data)*.
+5. Click **Deploy** → Authorize access → Copy the generated **Web app URL** (ends in `/exec`).
+6. In WorkPulse, click the green **"📊 Google Sheet"** button on the toolbar, paste your Web App URL, and click **"Test Connection"**!
+
+> [!TIP]
+> Enable the **"⚡ Auto-Sync"** checkbox in the Google Sheet dialog to have WorkPulse automatically sync the active month to your Google Sheet whenever you add, edit, or delete a task!
 
 ---
 

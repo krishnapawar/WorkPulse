@@ -138,7 +138,10 @@ DEFAULT_SETTINGS = {
     "data_api_sync_on_create": True,
     "data_api_sync_on_delete": True,
     "lan_chat_enabled": True,
-    "lan_chat_port": 45454
+    "lan_chat_port": 45454,
+    "gsheet_webapp_url": "",
+    "gsheet_auto_sync": False,
+    "gsheet_last_sync": ""
 }
 
 # ---------- Settings Management ----------
@@ -1639,6 +1642,232 @@ def send_data_api_webhook(payload, api_url=None, auth_token=None, timeout=15):
     except Exception as e:
         return False, f"Request Error: {str(e)}", 0
 
+# ---------- Google Sheets Sync Integration ----------
+
+def get_google_apps_script_code():
+    """Reads or returns the ready-to-deploy Google Apps Script code for Google Sheets sync."""
+    script_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "google_apps_script.js")
+    if os.path.exists(script_path):
+        try:
+            with open(script_path, "r", encoding="utf-8") as f:
+                return f.read()
+        except Exception:
+            pass
+    return """/**
+ * WorkPulse - Google Sheets Sync Integration (Google Apps Script)
+ * Extensions > Apps Script -> Paste -> Deploy as Web App (Access: Anyone)
+ */
+function doPost(e) {
+  var lock = LockService.getScriptLock();
+  lock.tryLock(20000);
+  try {
+    var data = JSON.parse(e.postData.contents);
+    var ss = SpreadsheetApp.getActiveSpreadsheet();
+    if (data.action === "ping") {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        message: "Connected to Google Sheet: '" + ss.getName() + "'",
+        sheetTitle: ss.getName(),
+        sheets: ss.getSheets().map(function(s) { return s.getName(); })
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    if (data.action === "sync_month" || data.action === "sync_sheet") {
+      var sName = data.sheet_name || "Work Logs";
+      var s = ss.getSheetByName(sName) || ss.insertSheet(sName);
+      var hd = data.headers || [];
+      var rows = data.rows || [];
+      s.clearContents();
+      if (hd.length) {
+        s.getRange(1, 1, 1, hd.length).setValues([hd]).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+      }
+      if (rows.length) {
+        s.getRange(2, 1, rows.length, hd.length).setValues(rows);
+      }
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        message: "Synced " + rows.length + " rows to tab '" + sName + "'",
+        updatedRows: rows.length,
+        sheetTitle: ss.getName()
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Unknown action" })).setMimeType(ContentService.MimeType.JSON);
+  } catch (err) {
+    return ContentService.createTextOutput(JSON.stringify({ status: "error", message: err.toString() })).setMimeType(ContentService.MimeType.JSON);
+  } finally {
+    lock.releaseLock();
+  }
+}
+function doGet(e) {
+  var ss = SpreadsheetApp.getActiveSpreadsheet();
+  return ContentService.createTextOutput(JSON.stringify({ status: "online", sheetTitle: ss.getName() })).setMimeType(ContentService.MimeType.JSON);
+}"""
+
+def get_raw_sheet_rows(sheet_name):
+    """
+    Reads all formatted data rows from a specific month sheet in FILE.
+    Returns (headers: list, rows: list of lists).
+    """
+    if not os.path.exists(FILE):
+        return HEADERS, []
+    try:
+        wb = load_workbook(FILE, data_only=True)
+        if sheet_name not in wb.sheetnames:
+            return HEADERS, []
+        ws = wb[sheet_name]
+        headers = [str(cell.value or "") for cell in ws[1]] if ws.max_row >= 1 else HEADERS
+        rows = []
+        for row in ws.iter_rows(min_row=2, values_only=True):
+            if any(row):
+                cleaned = []
+                for val in row:
+                    if val is None:
+                        cleaned.append("")
+                    elif isinstance(val, (datetime.date, datetime.datetime)):
+                        cleaned.append(val.strftime("%Y-%m-%d"))
+                    else:
+                        cleaned.append(str(val))
+                rows.append(cleaned)
+        return headers, rows
+    except Exception as e:
+        print(f"Error reading rows for sheet {sheet_name}: {e}")
+        return HEADERS, []
+
+def get_all_raw_sheets():
+    """
+    Reads all month sheets in FILE.
+    Returns (headers: list, sheets_dict: { sheet_name: [rows] }).
+    """
+    result = {}
+    if not os.path.exists(FILE):
+        return HEADERS, result
+    try:
+        wb = load_workbook(FILE, data_only=True)
+        headers = HEADERS
+        for s_name in wb.sheetnames:
+            if s_name == "Records":
+                continue
+            ws = wb[s_name]
+            if ws.max_row >= 1:
+                headers = [str(cell.value or "") for cell in ws[1]]
+            rows = []
+            for row in ws.iter_rows(min_row=2, values_only=True):
+                if any(row):
+                    cleaned = []
+                    for val in row:
+                        if val is None:
+                            cleaned.append("")
+                        elif isinstance(val, (datetime.date, datetime.datetime)):
+                            cleaned.append(val.strftime("%Y-%m-%d"))
+                        else:
+                            cleaned.append(str(val))
+                    rows.append(cleaned)
+            result[s_name] = rows
+        return headers, result
+    except Exception as e:
+        print(f"Error reading all sheets: {e}")
+        return HEADERS, {}
+
+def send_google_sheet_payload(url, payload, timeout=35):
+    """
+    Sends structured JSON payload to Google Apps Script Web App.
+    Handles Google's 302 redirects seamlessly via requests or urllib.
+    Returns (success: bool, response_dict_or_text, status_code: int).
+    """
+    url = (url or "").strip()
+    if not url:
+        return False, "Google Sheet Web App URL is not configured. Please paste your Web App URL.", 0
+    if not (url.startswith("http://") or url.startswith("https://")):
+        return False, "Invalid Web App URL. Must start with https://script.google.com/macros/s/...", 0
+
+    try:
+        import requests
+        resp = requests.post(url, json=payload, timeout=timeout)
+        try:
+            data = resp.json()
+            if isinstance(data, dict):
+                if data.get("status") == "success" or data.get("status") == "online":
+                    return True, data, resp.status_code
+                else:
+                    return False, data.get("message", "Unknown error from Google Sheet"), resp.status_code
+            return True, {"response": data}, resp.status_code
+        except Exception:
+            if 200 <= resp.status_code < 300:
+                return True, {"message": resp.text.strip()}, resp.status_code
+            return False, f"Server HTTP {resp.status_code}: {resp.text[:200]}", resp.status_code
+    except ImportError:
+        try:
+            data_bytes = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+            req = urllib.request.Request(
+                url,
+                data=data_bytes,
+                headers={
+                    "Content-Type": "application/json; charset=utf-8",
+                    "User-Agent": "WorkPulse/1.0 (Google Sheets Client)"
+                },
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                body = resp.read().decode("utf-8", errors="replace")
+                try:
+                    data = json.loads(body)
+                    if data.get("status") == "success" or data.get("status") == "online":
+                        return True, data, resp.getcode()
+                    return False, data.get("message", body), resp.getcode()
+                except Exception:
+                    return True, {"message": body}, resp.getcode()
+        except urllib.error.HTTPError as e:
+            return False, f"HTTP Error {e.code}: {e.reason}", e.code
+        except Exception as e:
+            return False, f"Connection Error: {str(e)}", 0
+    except Exception as e:
+        return False, f"Request Error: {str(e)}", 0
+
+def ping_google_sheet(webapp_url=None, timeout=15):
+    """Pings the Google Sheet Web App to verify connection and fetch sheet title."""
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    payload = {"action": "ping", "client": "WorkPulse", "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")}
+    return send_google_sheet_payload(url, payload, timeout=timeout)
+
+def sync_google_sheet_month(month_name=None, webapp_url=None, timeout=35):
+    """Synchronizes all rows of a single month tab to Google Sheet."""
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    if not month_name:
+        month_name = datetime.datetime.now().strftime("%B %Y")
+    headers, rows = get_raw_sheet_rows(month_name)
+    payload = {
+        "action": "sync_month",
+        "sheet_name": month_name,
+        "headers": headers,
+        "rows": rows,
+        "user_name": settings.get("user_name", "Developer"),
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    ok, data, code = send_google_sheet_payload(url, payload, timeout=timeout)
+    if ok:
+        settings["gsheet_last_sync"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_settings(settings)
+    return ok, data, code
+
+def sync_google_sheet_all(webapp_url=None, timeout=50):
+    """Synchronizes all month tabs across the entire workbook to Google Sheet."""
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    headers, all_sheets = get_all_raw_sheets()
+    payload = {
+        "action": "sync_all",
+        "headers": headers,
+        "sheets": all_sheets,
+        "user_name": settings.get("user_name", "Developer"),
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    ok, data, code = send_google_sheet_payload(url, payload, timeout=timeout)
+    if ok:
+        settings["gsheet_last_sync"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        save_settings(settings)
+    return ok, data, code
+
 # ---------- Markdown / Text Bulk Log Parser ----------
 def extract_task_hours_and_title(raw_title):
     """Extract hours if specified in task title (e.g., '(2.5h)', '[1.5 hrs]', '(2 hours)', '- 2h') and return clean title."""
@@ -2266,6 +2495,11 @@ class SettingsDialog(tk.Toplevel):
         self.notebook.add(tab_api, text="  🌐 Data API / Webhook  ")
         self.build_data_api_tab(tab_api)
 
+        # Tab 4: Google Sheet Integration
+        tab_gsheet = tk.Frame(self.notebook, bg="#ffffff", padx=15, pady=12)
+        self.notebook.add(tab_gsheet, text="  📊 Google Sheet  ")
+        self.build_gsheet_tab(tab_gsheet)
+
         # Bottom Bar
         bottom = tk.Frame(self, bg="#f1f5f9", padx=15, pady=10)
         bottom.pack(fill=tk.X, side=tk.BOTTOM)
@@ -2623,6 +2857,79 @@ class SettingsDialog(tk.Toplevel):
     def open_sync_manager(self):
         SyncApiDialog(self)
 
+    def build_gsheet_tab(self, parent):
+        top_bar = tk.Frame(parent, bg="#ffffff")
+        top_bar.pack(fill=tk.X, pady=(0, 10))
+        tk.Label(top_bar, text="Synchronize work update records with your online Google Sheet via Google Apps Script.", font=("Segoe UI", 9), bg="#ffffff", fg="#475569").pack(side=tk.LEFT)
+
+        form_frame = tk.Frame(parent, bg="#ffffff")
+        form_frame.pack(fill=tk.BOTH, expand=True)
+
+        cfg_box = tk.LabelFrame(form_frame, text="  1. Google Sheet Web App Endpoint  ", font=("Segoe UI", 9, "bold"), fg="#0f9d58", bg="#ffffff", padx=12, pady=8, bd=1, relief="solid")
+        cfg_box.pack(fill=tk.X, pady=(0, 10))
+
+        tk.Label(cfg_box, text="Web App URL*:", font=("Segoe UI", 9, "bold"), bg="#ffffff", fg="#334155").grid(row=0, column=0, sticky="w", pady=4)
+        self.entry_gsheet_url = tk.Entry(cfg_box, font=("Segoe UI", 9), width=44, relief="solid", bd=1)
+        self.entry_gsheet_url.grid(row=0, column=1, sticky="ew", pady=4, padx=(8, 0))
+        self.entry_gsheet_url.insert(0, self.settings.get("gsheet_webapp_url", ""))
+
+        hint_lbl = tk.Label(cfg_box, text="💡 URL format: https://script.google.com/macros/s/.../exec", font=("Segoe UI", 8, "italic"), fg="#64748b", bg="#ffffff")
+        hint_lbl.grid(row=1, column=1, sticky="w", pady=(2, 6), padx=(8, 0))
+
+        btn_box = tk.Frame(cfg_box, bg="#ffffff")
+        btn_box.grid(row=2, column=1, sticky="w", padx=(8, 0), pady=4)
+
+        btn_test = tk.Button(btn_box, text="🧪 Test Connection", font=("Segoe UI", 8, "bold"), bg="#e0f2fe", fg="#0369a1", relief="flat", padx=10, pady=3, cursor="hand2", command=self.test_gsheet_api)
+        btn_test.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_open_mgr = tk.Button(btn_box, text="🔄 Open Google Sheet Sync...", font=("Segoe UI", 8, "bold"), bg="#ecfdf5", fg="#047857", relief="flat", padx=10, pady=3, cursor="hand2", command=self.open_gsheet_manager)
+        btn_open_mgr.pack(side=tk.LEFT, padx=(0, 6))
+
+        btn_copy_code = tk.Button(btn_box, text="📋 Copy Apps Script Code", font=("Segoe UI", 8), bg="#f8fafc", fg="#334155", relief="flat", padx=8, pady=3, cursor="hand2", command=self.copy_apps_script_code)
+        btn_copy_code.pack(side=tk.LEFT)
+
+        auto_box = tk.LabelFrame(form_frame, text="  2. Automatic Real-Time Synchronization  ", font=("Segoe UI", 9, "bold"), fg="#0f9d58", bg="#ffffff", padx=12, pady=8, bd=1, relief="solid")
+        auto_box.pack(fill=tk.X, pady=(0, 10))
+
+        self.var_gsheet_auto_sync = tk.BooleanVar(value=bool(self.settings.get("gsheet_auto_sync", False)))
+        chk_auto = tk.Checkbutton(auto_box, text="⚡ Auto-Sync on Save/Edit/Delete (Automatically updates Google Sheet tab in background)", variable=self.var_gsheet_auto_sync, font=("Segoe UI", 9, "bold"), fg="#1e293b", bg="#ffffff")
+        chk_auto.pack(anchor="w", pady=3)
+
+        guide_box = tk.LabelFrame(form_frame, text="  3. Quick Setup Guide (4 Steps - 30 seconds)  ", font=("Segoe UI", 9, "bold"), fg="#334155", bg="#f8fafc", padx=10, pady=6, bd=1, relief="solid")
+        guide_box.pack(fill=tk.BOTH, expand=True)
+
+        guide_text = (
+            "1. Open your Google Sheet in a web browser.\n"
+            "2. Click 'Extensions' menu -> 'Apps Script'.\n"
+            "3. Delete existing code, click 'Copy Apps Script Code' above, paste into editor, and click Save (💾).\n"
+            "4. Click 'Deploy' -> 'New deployment' -> type: 'Web app' -> Who has access: 'Anyone' -> Deploy!\n"
+            "   Copy the generated Web App URL and paste it into the Web App URL field above."
+        )
+        tk.Label(guide_box, text=guide_text, font=("Segoe UI", 8), bg="#f8fafc", fg="#475569", justify="left").pack(anchor="w", padx=4, pady=2)
+
+    def test_gsheet_api(self):
+        url = self.entry_gsheet_url.get().strip()
+        if not url:
+            messagebox.showwarning("Empty URL", "Please enter your Google Sheet Web App URL first.")
+            return
+        ok, data, code = ping_google_sheet(webapp_url=url)
+        if ok:
+            title = data.get("sheetTitle", "Google Sheet") if isinstance(data, dict) else "Google Sheet"
+            messagebox.showinfo("Google Sheet Connected", f"✅ Connection Successful!\n\n• Target Spreadsheet: {title}\n• Status: Online\n\nYou can now sync your work logs!")
+        else:
+            msg = data if isinstance(data, str) else data.get("message", "Unknown error")
+            messagebox.showerror("Connection Failed", f"❌ Failed to reach Google Sheet:\n\n{msg}\n\nPlease verify that your deployment is set to 'Who has access: Anyone'.")
+
+    def open_gsheet_manager(self):
+        GoogleSheetSyncDialog(self.parent if self.parent else self)
+
+    def copy_apps_script_code(self):
+        code = get_google_apps_script_code()
+        self.clipboard_clear()
+        self.clipboard_append(code)
+        self.update()
+        messagebox.showinfo("Copied", "📋 Google Apps Script code copied to clipboard!\n\nOpen your Google Sheet -> Extensions -> Apps Script -> Paste -> Deploy as Web app.")
+
     def save(self):
         selected_offs = [d for d, var in self.off_vars.items() if var.get()]
         sec_fourth = getattr(self, "var_sec_fourth", tk.BooleanVar(value=False)).get()
@@ -2643,7 +2950,9 @@ class SettingsDialog(tk.Toplevel):
             "data_api_token": self.entry_data_api_token.get().strip() if hasattr(self, 'entry_data_api_token') else self.settings.get("data_api_token", ""),
             "data_api_sync_on_edit": self.var_api_sync_on_edit.get() if hasattr(self, 'var_api_sync_on_edit') else True,
             "data_api_sync_on_create": self.var_api_sync_on_create.get() if hasattr(self, 'var_api_sync_on_create') else True,
-            "data_api_sync_on_delete": self.var_api_sync_on_delete.get() if hasattr(self, 'var_api_sync_on_delete') else True
+            "data_api_sync_on_delete": self.var_api_sync_on_delete.get() if hasattr(self, 'var_api_sync_on_delete') else True,
+            "gsheet_webapp_url": self.entry_gsheet_url.get().strip() if hasattr(self, 'entry_gsheet_url') else self.settings.get("gsheet_webapp_url", ""),
+            "gsheet_auto_sync": self.var_gsheet_auto_sync.get() if hasattr(self, 'var_gsheet_auto_sync') else self.settings.get("gsheet_auto_sync", False)
         })
         save_settings(self.settings)
 
@@ -2889,6 +3198,362 @@ class SyncApiDialog(tk.Toplevel):
         else:
             self.lbl_status.config(text=f"❌ Sync Failed: {resp_msg[:70]}", fg="#dc2626")
             messagebox.showerror("Sync Failed", f"❌ Failed to sync records to API:\n\n{resp_msg}\n\nPlease check your server logs or URL.")
+
+# ---------- Dedicated Google Sheets Cloud Synchronizer Modal Dialog ----------
+class GoogleSheetSyncDialog(tk.Toplevel):
+    def __init__(self, parent, app_ref=None, on_complete_callback=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.app_ref = app_ref
+        self.on_complete_callback = on_complete_callback
+        self.title("📊 Google Sheets Cloud Synchronizer")
+        self.configure(bg="#f8fafc")
+        self.transient(parent)
+        self.grab_set()
+        center_window(self, parent, default_w=730, default_h=660, min_w=640, min_h=540)
+
+        self.settings = load_settings()
+        self.is_syncing = False
+        self.create_widgets()
+
+    def create_widgets(self):
+        # Header banner
+        header = tk.Frame(self, bg="#0f9d58", height=56)
+        header.pack(fill=tk.X, side=tk.TOP)
+        header.pack_propagate(False)
+
+        h_title_box = tk.Frame(header, bg="#0f9d58")
+        h_title_box.pack(side=tk.LEFT, padx=16, pady=8)
+        tk.Label(h_title_box, text="📊 Google Sheets Cloud Synchronizer", font=("Segoe UI", 12, "bold"), fg="white", bg="#0f9d58").pack(anchor="w")
+        tk.Label(h_title_box, text="Push complete Excel work updates and monthly tabs to your Google Spreadsheet in real-time", font=("Segoe UI", 8), fg="#d1fae5", bg="#0f9d58").pack(anchor="w")
+
+        # Main frame
+        main_f = tk.Frame(self, bg="#f8fafc", padx=14, pady=10)
+        main_f.pack(fill=tk.BOTH, expand=True)
+
+        # 1. Google Sheet Connection Card
+        cfg_card = tk.LabelFrame(main_f, text="  1. Google Apps Script Web App Connection  ", font=("Segoe UI", 9, "bold"), fg="#0f9d58", bg="#ffffff", padx=12, pady=8, bd=1, relief="solid")
+        cfg_card.pack(fill=tk.X, pady=(0, 8))
+
+        row1 = tk.Frame(cfg_card, bg="#ffffff")
+        row1.pack(fill=tk.X)
+
+        tk.Label(row1, text="Web App URL:", font=("Segoe UI", 9, "bold"), bg="#ffffff", fg="#334155").pack(side=tk.LEFT, padx=(0, 6))
+        self.entry_url = tk.Entry(row1, font=("Segoe UI", 9), relief="solid", bd=1)
+        self.entry_url.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 6), ipady=2)
+        saved_url = self.settings.get("gsheet_webapp_url", "").strip()
+        if saved_url:
+            self.entry_url.insert(0, saved_url)
+
+        btn_save_url = tk.Button(row1, text="💾 Save URL", font=("Segoe UI", 8, "bold"), bg="#f1f5f9", fg="#334155", relief="flat", padx=8, pady=2, cursor="hand2", command=self.save_url_only)
+        btn_save_url.pack(side=tk.RIGHT)
+
+        btn_test = tk.Button(row1, text="🧪 Test Connection", font=("Segoe UI", 8, "bold"), bg="#e0f2fe", fg="#0369a1", relief="flat", padx=8, pady=2, cursor="hand2", command=self.test_connection)
+        btn_test.pack(side=tk.RIGHT, padx=4)
+
+        # Action buttons under URL (Copy Script, Setup Instructions)
+        row_tools = tk.Frame(cfg_card, bg="#ffffff")
+        row_tools.pack(fill=tk.X, pady=(6, 0))
+
+        btn_copy_code = tk.Button(row_tools, text="📋 Copy Google Apps Script Code", font=("Segoe UI", 8, "bold"), bg="#ecfdf5", fg="#047857", relief="flat", padx=10, pady=3, cursor="hand2", command=self.copy_apps_script)
+        btn_copy_code.pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_instructions = tk.Button(row_tools, text="📖 How to Setup in 30 Seconds", font=("Segoe UI", 8), bg="#f8fafc", fg="#475569", relief="flat", padx=8, pady=3, cursor="hand2", command=self.show_instructions)
+        btn_instructions.pack(side=tk.LEFT)
+
+        self.lbl_conn_status = tk.Label(cfg_card, text="", font=("Segoe UI", 8), bg="#ffffff")
+        self.lbl_conn_status.pack(anchor="w", pady=(4, 0))
+        if saved_url:
+            last_sync = self.settings.get("gsheet_last_sync", "")
+            if last_sync:
+                self.lbl_conn_status.config(text=f"Last synchronized: {last_sync}", fg="#64748b")
+            else:
+                self.lbl_conn_status.config(text="Configured (ready to test or sync)", fg="#047857")
+        else:
+            self.lbl_conn_status.config(text="⚠️ Not configured. Click 'How to Setup' for quick 4-step instructions.", fg="#d97706")
+
+        # 2. Synchronization Actions Card
+        sync_card = tk.LabelFrame(main_f, text="  2. Push / Synchronize Data  ", font=("Segoe UI", 9, "bold"), fg="#0f9d58", bg="#ffffff", padx=12, pady=8, bd=1, relief="solid")
+        sync_card.pack(fill=tk.X, pady=(0, 8))
+
+        # Target Month
+        curr_month = ""
+        if hasattr(self.parent, 'current_selected_month') and self.parent.current_selected_month.get():
+            curr_month = self.parent.current_selected_month.get()
+        elif hasattr(self.app_ref, 'current_selected_month') and self.app_ref.current_selected_month.get():
+            curr_month = self.app_ref.current_selected_month.get()
+        else:
+            avail = get_available_months()
+            curr_month = avail[0] if avail else datetime.datetime.now().strftime("%B %Y")
+        self.target_month_name = curr_month
+
+        avail_months = get_available_months()
+        all_recs = get_all_records_across_all_sheets()
+        month_recs = get_records_for_month(curr_month)
+
+        act_row = tk.Frame(sync_card, bg="#ffffff")
+        act_row.pack(fill=tk.X, pady=4)
+
+        self.btn_sync_month = tk.Button(
+            act_row,
+            text=f"🚀 Sync Current Month ('{curr_month}' - {len(month_recs)} rows)",
+            font=("Segoe UI", 9, "bold"),
+            bg="#0f9d58",
+            fg="white",
+            activebackground="#0b8043",
+            activeforeground="white",
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            command=self.sync_current_month
+        )
+        self.btn_sync_month.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_sync_all = tk.Button(
+            act_row,
+            text=f"🌐 Sync All Months ({len(avail_months)} sheets - {len(all_recs)} rows)",
+            font=("Segoe UI", 9, "bold"),
+            bg="#1e40af",
+            fg="white",
+            activebackground="#1d4ed8",
+            activeforeground="white",
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            command=self.sync_all_months
+        )
+        self.btn_sync_all.pack(side=tk.LEFT)
+
+        # Automation checkbox
+        self.var_auto_sync = tk.BooleanVar(value=bool(self.settings.get("gsheet_auto_sync", False)))
+        chk_auto = tk.Checkbutton(
+            sync_card,
+            text="⚡ Auto-Sync: Automatically update Google Sheet tab in background on every Save / Edit / Delete",
+            variable=self.var_auto_sync,
+            font=("Segoe UI", 9, "bold"),
+            fg="#1e293b",
+            bg="#ffffff",
+            command=self.toggle_auto_sync
+        )
+        chk_auto.pack(anchor="w", pady=(8, 2))
+
+        # 3. Live Activity & Response Log Card
+        log_card = tk.LabelFrame(main_f, text="  3. Live Activity & Server Response Log  ", font=("Segoe UI", 9, "bold"), fg="#0f9d58", bg="#ffffff", padx=10, pady=6, bd=1, relief="solid")
+        log_card.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+
+        self.lbl_progress = tk.Label(log_card, text="Ready. Click 'Sync Current Month' or 'Sync All Months' to begin.", font=("Segoe UI", 9), bg="#ffffff", fg="#475569")
+        self.lbl_progress.pack(anchor="w", pady=(0, 4))
+
+        self.text_log = tk.Text(log_card, font=("Consolas", 8), height=8, bg="#f8fafc", fg="#334155", relief="solid", bd=1, wrap=tk.NONE)
+        self.text_log.pack(fill=tk.BOTH, expand=True)
+        self.log_message(f"WorkPulse Google Sheet Sync Initialized. Local sheets: {len(avail_months)} ({', '.join(avail_months[:3])}...)")
+
+        # Bottom Bar
+        bottom = tk.Frame(self, bg="#f1f5f9", padx=14, pady=8)
+        bottom.pack(fill=tk.X, side=tk.BOTTOM)
+
+        btn_close = tk.Button(bottom, text="Close", font=("Segoe UI", 9), bg="#e2e8f0", fg="#475569", relief="flat", padx=14, pady=4, cursor="hand2", command=self.destroy)
+        btn_close.pack(side=tk.RIGHT)
+
+    def log_message(self, text):
+        ts = datetime.datetime.now().strftime("%H:%M:%S")
+        self.text_log.insert(tk.END, f"[{ts}] {text}\n")
+        self.text_log.see(tk.END)
+
+    def copy_apps_script(self):
+        code = get_google_apps_script_code()
+        self.clipboard_clear()
+        self.clipboard_append(code)
+        self.update()
+        self.log_message("Copied Google Apps Script code to clipboard.")
+        messagebox.showinfo(
+            "Code Copied",
+            "📋 Google Apps Script code copied to clipboard!\n\n"
+            "Next steps:\n"
+            "1. Open your Google Sheet in browser.\n"
+            "2. Click Extensions -> Apps Script.\n"
+            "3. Paste code and click Save (💾).\n"
+            "4. Deploy -> New deployment -> type: Web app (Who has access: Anyone).\n"
+            "5. Copy Web app URL and paste into WorkPulse."
+        )
+
+    def show_instructions(self):
+        top = tk.Toplevel(self)
+        top.title("📖 How to Setup Google Sheet Sync (4 Steps)")
+        top.configure(bg="#ffffff")
+        top.transient(self)
+        center_window(top, self, default_w=640, default_h=480)
+
+        header = tk.Frame(top, bg="#0f9d58", height=45)
+        header.pack(fill=tk.X)
+        tk.Label(header, text="📖 Google Sheets Setup Guide", font=("Segoe UI", 11, "bold"), fg="white", bg="#0f9d58").pack(side=tk.LEFT, padx=12, pady=10)
+
+        txt_frame = tk.Frame(top, bg="#ffffff", padx=15, pady=12)
+        txt_frame.pack(fill=tk.BOTH, expand=True)
+
+        guide_msg = (
+            "Setting up Google Sheets sync is 100% FREE and takes 30 seconds:\n\n"
+            "Step 1: Open your Google Sheet\n"
+            "• Create a new Google Sheet or open your existing sheet at sheets.google.com.\n\n"
+            "Step 2: Open Apps Script\n"
+            "• In the top menu, click 'Extensions' -> 'Apps Script'.\n\n"
+            "Step 3: Paste the WorkPulse Script\n"
+            "• Delete any template code in the editor.\n"
+            "• Click 'Copy Google Apps Script Code' in WorkPulse and paste it in the editor.\n"
+            "• Click the Save icon (💾) or press Ctrl+S.\n\n"
+            "Step 4: Deploy as Web App\n"
+            "• In the top right, click 'Deploy' -> 'New deployment'.\n"
+            "• Click the gear icon (⚙️) next to 'Select type' and choose 'Web app'.\n"
+            "• Set 'Execute as' -> 'Me (<your email>)'.\n"
+            "• Set 'Who has access' -> 'Anyone' (Required for WorkPulse sync).\n"
+            "• Click 'Deploy' -> Authorize access.\n"
+            "• Copy the 'Web app URL' (ends in /exec) and paste it into WorkPulse!\n\n"
+            "That's it! Your WorkPulse desktop & mobile apps will now sync to Google Sheets seamlessly!"
+        )
+        t = tk.Text(txt_frame, font=("Segoe UI", 9), bg="#f8fafc", fg="#1e293b", wrap=tk.WORD, relief="solid", bd=1, padx=8, pady=8)
+        t.insert("1.0", guide_msg)
+        t.config(state=tk.DISABLED)
+        t.pack(fill=tk.BOTH, expand=True)
+
+        btn_box = tk.Frame(top, bg="#ffffff", padx=15, pady=8)
+        btn_box.pack(fill=tk.X)
+        btn_copy = tk.Button(btn_box, text="📋 Copy Apps Script Code", font=("Segoe UI", 9, "bold"), bg="#0f9d58", fg="white", relief="flat", padx=10, pady=4, cursor="hand2", command=self.copy_apps_script)
+        btn_copy.pack(side=tk.LEFT)
+        btn_ok = tk.Button(btn_box, text="Got it!", font=("Segoe UI", 9), bg="#e2e8f0", fg="#334155", relief="flat", padx=14, pady=4, cursor="hand2", command=top.destroy)
+        btn_ok.pack(side=tk.RIGHT)
+
+    def save_url_only(self):
+        url = self.entry_url.get().strip()
+        self.settings["gsheet_webapp_url"] = url
+        save_settings(self.settings)
+        self.log_message(f"Saved Web App URL: {url[:50]}...")
+        self.lbl_conn_status.config(text="Saved! Ready to test connection.", fg="#047857")
+        messagebox.showinfo("Saved", "Google Sheet Web App URL saved successfully!")
+
+    def toggle_auto_sync(self):
+        val = self.var_auto_sync.get()
+        self.settings["gsheet_auto_sync"] = val
+        save_settings(self.settings)
+        status_str = "ENABLED" if val else "DISABLED"
+        self.log_message(f"Auto-Sync on Save/Edit/Delete is now {status_str}.")
+
+    def test_connection(self):
+        url = self.entry_url.get().strip()
+        if not url:
+            messagebox.showwarning("Empty URL", "Please enter your Google Sheet Web App URL.")
+            return
+
+        self.save_url_only()
+        self.log_message(f"Pinging Google Sheet Web App at {url[:45]}...")
+        self.lbl_progress.config(text="Testing connection...", fg="#0284c7")
+
+        def _do_ping():
+            ok, data, code = ping_google_sheet(webapp_url=url)
+            self.after(0, lambda: self._on_ping_finished(ok, data, code))
+
+        threading.Thread(target=_do_ping, daemon=True).start()
+
+    def _on_ping_finished(self, ok, data, code):
+        if ok:
+            title = data.get("sheetTitle", "Google Spreadsheet") if isinstance(data, dict) else "Google Spreadsheet"
+            sheets = data.get("sheets", []) if isinstance(data, dict) else []
+            sheets_str = f" ({len(sheets)} tabs: {', '.join(sheets[:3])}...)" if sheets else ""
+            self.log_message(f"SUCCESS: Connected to '{title}'{sheets_str} [HTTP {code}]")
+            self.lbl_progress.config(text=f"✅ Connected to '{title}'", fg="#16a34a")
+            self.lbl_conn_status.config(text=f"✅ Connected: '{title}'", fg="#16a34a")
+            messagebox.showinfo("Connected", f"✅ Successfully connected to Google Sheet!\n\n• Sheet: {title}\n• Status: Online\n• Code: HTTP {code}")
+        else:
+            msg = data if isinstance(data, str) else data.get("message", "Unknown error")
+            self.log_message(f"FAILED: {msg} [HTTP {code}]")
+            self.lbl_progress.config(text=f"❌ Connection failed: {str(msg)[:40]}", fg="#dc2626")
+            self.lbl_conn_status.config(text="❌ Connection failed", fg="#dc2626")
+            messagebox.showerror("Connection Failed", f"❌ Failed to reach Google Sheet Web App:\n\n{msg}\n\nPlease check your URL and ensure deployment is set to 'Who has access: Anyone'.")
+
+    def sync_current_month(self):
+        url = self.entry_url.get().strip()
+        if not url:
+            messagebox.showwarning("Empty URL", "Please enter your Google Sheet Web App URL first.")
+            return
+
+        month = self.target_month_name
+        self.is_syncing = True
+        self.btn_sync_month.config(state=tk.DISABLED, text="⏳ Syncing Month...")
+        self.btn_sync_all.config(state=tk.DISABLED)
+        self.lbl_progress.config(text=f"Pushing '{month}' to Google Sheet...", fg="#0284c7")
+        self.log_message(f"Starting sync for month tab: '{month}'...")
+
+        def _do_sync():
+            ok, data, code = sync_google_sheet_month(month_name=month, webapp_url=url)
+            self.after(0, lambda: self._on_sync_month_finished(ok, data, code, month))
+
+        threading.Thread(target=_do_sync, daemon=True).start()
+
+    def _on_sync_month_finished(self, ok, data, code, month):
+        self.is_syncing = False
+        recs = get_records_for_month(month)
+        self.btn_sync_month.config(state=tk.NORMAL, text=f"🚀 Sync Current Month ('{month}' - {len(recs)} rows)")
+        self.btn_sync_all.config(state=tk.NORMAL)
+
+        if ok:
+            rows_cnt = data.get("updatedRows", len(recs)) if isinstance(data, dict) else len(recs)
+            title = data.get("sheetTitle", "Google Sheet") if isinstance(data, dict) else "Google Sheet"
+            self.log_message(f"SUCCESS: Synchronized {rows_cnt} rows to '{month}' tab in '{title}' [HTTP {code}].")
+            self.lbl_progress.config(text=f"✅ Synced {rows_cnt} rows to '{month}' tab successfully!", fg="#16a34a")
+            self.lbl_conn_status.config(text=f"Last synchronized: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", fg="#64748b")
+            if self.on_complete_callback:
+                try:
+                    self.on_complete_callback()
+                except Exception:
+                    pass
+            messagebox.showinfo("Sync Complete", f"✅ Successfully synchronized month '{month}'!\n\n• Google Sheet: {title}\n• Tab: {month}\n• Rows Synced: {rows_cnt}\n\nWeekly offs and holidays have been highlighted!")
+        else:
+            msg = data if isinstance(data, str) else data.get("message", "Unknown error")
+            self.log_message(f"FAILED: {msg} [HTTP {code}]")
+            self.lbl_progress.config(text=f"❌ Sync failed: {str(msg)[:40]}", fg="#dc2626")
+            messagebox.showerror("Sync Failed", f"❌ Failed to sync month '{month}' to Google Sheet:\n\n{msg}")
+
+    def sync_all_months(self):
+        url = self.entry_url.get().strip()
+        if not url:
+            messagebox.showwarning("Empty URL", "Please enter your Google Sheet Web App URL first.")
+            return
+
+        months = get_available_months()
+        all_recs = get_all_records_across_all_sheets()
+        if not messagebox.askyesno("Sync All Months", f"Push all {len(months)} months ({len(all_recs)} total rows) to Google Sheet tabs?"):
+            return
+
+        self.is_syncing = True
+        self.btn_sync_all.config(state=tk.DISABLED, text="⏳ Syncing All Sheets...")
+        self.btn_sync_month.config(state=tk.DISABLED)
+        self.lbl_progress.config(text=f"Pushing {len(months)} month tabs to Google Sheet...", fg="#0284c7")
+        self.log_message(f"Starting bulk sync for {len(months)} sheets ({len(all_recs)} total records)...")
+
+        def _do_sync_all():
+            ok, data, code = sync_google_sheet_all(webapp_url=url)
+            self.after(0, lambda: self._on_sync_all_finished(ok, data, code, len(months), len(all_recs)))
+
+        threading.Thread(target=_do_sync_all, daemon=True).start()
+
+    def _on_sync_all_finished(self, ok, data, code, sheets_cnt, total_rows):
+        self.is_syncing = False
+        recs = get_records_for_month(self.target_month_name)
+        self.btn_sync_month.config(state=tk.NORMAL, text=f"🚀 Sync Current Month ('{self.target_month_name}' - {len(recs)} rows)")
+        self.btn_sync_all.config(state=tk.NORMAL, text=f"🌐 Sync All Months ({sheets_cnt} sheets - {total_rows} rows)")
+
+        if ok:
+            title = data.get("sheetTitle", "Google Sheet") if isinstance(data, dict) else "Google Sheet"
+            self.log_message(f"SUCCESS: Synchronized {sheets_cnt} sheets ({total_rows} rows) to '{title}' [HTTP {code}].")
+            self.lbl_progress.config(text=f"✅ Synced {sheets_cnt} sheets ({total_rows} records) successfully!", fg="#16a34a")
+            self.lbl_conn_status.config(text=f"Last synchronized: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", fg="#64748b")
+            messagebox.showinfo("Bulk Sync Complete", f"✅ All {sheets_cnt} month tabs synchronized successfully!\n\n• Target Spreadsheet: {title}\n• Total Sheets: {sheets_cnt}\n• Total Records: {total_rows}")
+        else:
+            msg = data if isinstance(data, str) else data.get("message", "Unknown error")
+            self.log_message(f"FAILED: {msg} [HTTP {code}]")
+            self.lbl_progress.config(text=f"❌ Bulk sync failed: {str(msg)[:40]}", fg="#dc2626")
+            messagebox.showerror("Sync Failed", f"❌ Failed to sync all months to Google Sheet:\n\n{msg}")
 
 # ---------- Dedicated Weekend & Holiday Settings Modal Dialog ----------
 class WeekendHolidayDialog(tk.Toplevel):
@@ -5237,6 +5902,9 @@ class TodayWorkUpdateApp:
         btn_sync_api = tk.Button(r2, text="🔄 Sync to API", font=("Segoe UI", 8, "bold"), bg="#0d9488", fg="white", activebackground="#0f766e", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_sync_api_dialog)
         btn_sync_api.pack(side=tk.LEFT, padx=2)
 
+        btn_sync_gsheet = tk.Button(r2, text="📊 Google Sheet", font=("Segoe UI", 8, "bold"), bg="#0f9d58", fg="white", activebackground="#0b8043", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_google_sheet_sync_dialog)
+        btn_sync_gsheet.pack(side=tk.LEFT, padx=2)
+
         btn_settings = tk.Button(r2, text="⚙️ Settings", font=("Segoe UI", 8, "bold"), bg="#334155", fg="white", activebackground="#475569", activeforeground="white", relief="flat", padx=10, pady=2, cursor="hand2", command=self.open_settings)
         btn_settings.pack(side=tk.LEFT, padx=2)
 
@@ -5653,6 +6321,9 @@ class TodayWorkUpdateApp:
         btn_sync_api_tbl = tk.Button(f_act_btns, text="🔄 Sync All to API", font=("Segoe UI", 9, "bold"), bg="#0d9488", fg="white", activebackground="#0f766e", activeforeground="white", relief="flat", padx=10, pady=4, cursor="hand2", command=self.open_sync_api_dialog)
         btn_sync_api_tbl.pack(side=tk.LEFT, padx=3)
 
+        btn_sync_gsheet_tbl = tk.Button(f_act_btns, text="📊 Sync to Google Sheet", font=("Segoe UI", 9, "bold"), bg="#0f9d58", fg="white", activebackground="#0b8043", activeforeground="white", relief="flat", padx=10, pady=4, cursor="hand2", command=self.open_google_sheet_sync_dialog)
+        btn_sync_gsheet_tbl.pack(side=tk.LEFT, padx=3)
+
         tip_lbl = tk.Label(action_bar, text="💡 Tip: Click 'Share Today's Log' to copy Markdown with Shift Timings to Teams/Slack", font=("Segoe UI", 8, "italic"), fg="#64748b", bg="#f8fafc", wraplength=350, justify="right")
         tip_lbl.pack(side=tk.RIGHT, padx=5)
 
@@ -5867,6 +6538,9 @@ class TodayWorkUpdateApp:
 
     def open_sync_api_dialog(self):
         SyncApiDialog(self.root)
+
+    def open_google_sheet_sync_dialog(self):
+        GoogleSheetSyncDialog(self.root, app_ref=self)
 
     def on_status_changed(self):
         st = self.combo_status.get()
@@ -6196,6 +6870,22 @@ class TodayWorkUpdateApp:
 
                 threading.Thread(target=_trigger_api_webhook, args=(api_payload, action_type), daemon=True).start()
 
+            # Google Sheet Auto-Sync Trigger
+            if settings.get("gsheet_auto_sync", False) and settings.get("gsheet_webapp_url"):
+                target_m = target_month
+                def _trigger_gsheet_sync(m_name):
+                    ok, data, code = sync_google_sheet_month(m_name)
+                    if ok:
+                        self.root.after(0, lambda: self.status.config(
+                            text=f"✅ Saved & Auto-synced to Google Sheet ('{m_name}') at {datetime.datetime.now().strftime('%H:%M:%S')}"
+                        ))
+                    else:
+                        msg = data.get("message") if isinstance(data, dict) else str(data)
+                        self.root.after(0, lambda: self.status.config(
+                            text=f"⚠️ Saved locally, but Google Sheet sync failed: {str(msg)[:60]}"
+                        ))
+                threading.Thread(target=_trigger_gsheet_sync, args=(target_m,), daemon=True).start()
+
             self.clear_form()
 
     def load_selected_into_form(self):
@@ -6314,6 +7004,11 @@ class TodayWorkUpdateApp:
                     }
                 }
                 threading.Thread(target=lambda: send_data_api_webhook(del_payload), daemon=True).start()
+
+            # Google Sheet Auto-Sync on Delete
+            if settings.get("gsheet_auto_sync", False) and settings.get("gsheet_webapp_url"):
+                target_m = current_month
+                threading.Thread(target=lambda: sync_google_sheet_month(target_m), daemon=True).start()
         else:
             messagebox.showerror("Error", "Could not delete record. Please check file permissions.")
 
