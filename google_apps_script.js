@@ -94,42 +94,51 @@ function doPost(e) {
         dataRange.setFontFamily("Segoe UI");
         dataRange.setVerticalAlignment("middle");
 
-        // Format and Color Rows
+        // Batch Format and Color Rows (Single Remote Call for Blazing Speed)
+        var backgrounds = [];
+        var fontColors = [];
         for (var i = 0; i < rows.length; i++) {
-          var rowNum = i + 2;
-          var status = (rows[i][6] || "").toString().trim().toLowerCase(); // Column 7 is Status (index 6)
+          var status = (rows[i][6] || "").toString().trim().toLowerCase();
+          var rowBg = [];
+          var rowFg = [];
+          var baseBg = "#FFFFFF";
+          var baseFg = "#1E293B";
 
           if (status.indexOf("weekly off") !== -1) {
-            // Soft Blue Weekly Off
-            targetSheet.getRange(rowNum, 1, 1, headers.length)
-              .setBackground("#DBEAFE")
-              .setFontColor("#1E40AF");
+            baseBg = "#DBEAFE"; baseFg = "#1E40AF";
           } else if (status.indexOf("holiday") !== -1) {
-            // Soft Amber Holiday
-            targetSheet.getRange(rowNum, 1, 1, headers.length)
-              .setBackground("#FEF3C7")
-              .setFontColor("#92400E");
+            baseBg = "#FEF3C7"; baseFg = "#92400E";
           } else if (status.indexOf("leave") !== -1) {
-            // Soft Red Leave
-            targetSheet.getRange(rowNum, 1, 1, headers.length)
-              .setBackground("#FEE2E2")
-              .setFontColor("#991B1B");
-          } else if (status.indexOf("completed") !== -1) {
-            // Soft Green highlight for Completed status badge
-            targetSheet.getRange(rowNum, 7, 1, 1)
-              .setBackground("#DCFCE7")
-              .setFontColor("#166534")
-              .setFontWeight("bold");
+            baseBg = "#FEE2E2"; baseFg = "#991B1B";
           }
+
+          for (var c = 0; c < headers.length; c++) {
+            if (c === 6 && status.indexOf("completed") !== -1) {
+              rowBg.push("#DCFCE7"); rowFg.push("#166534");
+            } else {
+              rowBg.push(baseBg); rowFg.push(baseFg);
+            }
+          }
+          backgrounds.push(rowBg);
+          fontColors.push(rowFg);
         }
+        dataRange.setBackgrounds(backgrounds);
+        dataRange.setFontColors(fontColors);
       }
 
-      // Auto-fit column widths (with sensible limits)
-      for (var col = 1; col <= Math.min(headers.length, 13); col++) {
-        targetSheet.autoResizeColumn(col);
-        var currentW = targetSheet.getColumnWidth(col);
-        if (currentW > 350) targetSheet.setColumnWidth(col, 350);
-        if (currentW < 80) targetSheet.setColumnWidth(col, 80);
+      // Fast Preset Column Widths (Avoids slow autoResizeColumn network roundtrips)
+      var colWidths = [120, 100, 160, 220, 260, 95, 120, 180, 100, 100, 130, 130, 150];
+      for (var col = 1; col <= Math.min(headers.length, colWidths.length); col++) {
+        targetSheet.setColumnWidth(col, colWidths[col - 1]);
+      }
+
+      // Bring active month tab to front
+      ss.setActiveSheet(targetSheet);
+
+      // Clean up empty default "Sheet1" if present so target tab is immediately visible
+      var sheet1 = ss.getSheetByName("Sheet1");
+      if (sheet1 && ss.getSheets().length > 1 && sheet1.getLastRow() === 0) {
+        try { ss.deleteSheet(sheet1); } catch (e) {}
       }
 
       return ContentService.createTextOutput(JSON.stringify({
@@ -167,22 +176,39 @@ function doPost(e) {
           dRange.setValues(sRows);
           dRange.setFontFamily("Segoe UI");
 
+          var backgrounds = [];
+          var fontColors = [];
           for (var ri = 0; ri < sRows.length; ri++) {
             var st = (sRows[ri][6] || "").toString().toLowerCase();
-            var rowIdx = ri + 2;
+            var bBg = "#FFFFFF";
+            var bFg = "#1E293B";
             if (st.indexOf("weekly off") !== -1) {
-              curSheet.getRange(rowIdx, 1, 1, headers.length).setBackground("#DBEAFE").setFontColor("#1E40AF");
+              bBg = "#DBEAFE"; bFg = "#1E40AF";
             } else if (st.indexOf("holiday") !== -1) {
-              curSheet.getRange(rowIdx, 1, 1, headers.length).setBackground("#FEF3C7").setFontColor("#92400E");
+              bBg = "#FEF3C7"; bFg = "#92400E";
             } else if (st.indexOf("leave") !== -1) {
-              curSheet.getRange(rowIdx, 1, 1, headers.length).setBackground("#FEE2E2").setFontColor("#991B1B");
+              bBg = "#FEE2E2"; bFg = "#991B1B";
             }
+            var rowBg = [];
+            var rowFg = [];
+            for (var c = 0; c < headers.length; c++) {
+              if (c === 6 && st.indexOf("completed") !== -1) {
+                rowBg.push("#DCFCE7"); rowFg.push("#166534");
+              } else {
+                rowBg.push(bBg); rowFg.push(bFg);
+              }
+            }
+            backgrounds.push(rowBg);
+            fontColors.push(rowFg);
           }
+          dRange.setBackgrounds(backgrounds);
+          dRange.setFontColors(fontColors);
           totalRows += sRows.length;
         }
 
-        for (var c = 1; c <= Math.min(headers.length, 13); c++) {
-          curSheet.autoResizeColumn(c);
+        var colWidths = [120, 100, 160, 220, 260, 95, 120, 180, 100, 100, 130, 130, 150];
+        for (var c = 1; c <= Math.min(headers.length, colWidths.length); c++) {
+          curSheet.setColumnWidth(c, colWidths[c - 1]);
         }
         syncedTabs.push(sName);
       }

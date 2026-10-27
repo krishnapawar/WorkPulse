@@ -140,7 +140,7 @@ DEFAULT_SETTINGS = {
     "lan_chat_enabled": True,
     "lan_chat_port": 45454,
     "gsheet_webapp_url": "",
-    "gsheet_auto_sync": False,
+    "gsheet_auto_sync": True,
     "gsheet_last_sync": ""
 }
 
@@ -184,6 +184,10 @@ def load_settings():
         merged["lan_chat_enabled"] = True
     if "lan_chat_port" not in merged:
         merged["lan_chat_port"] = 45454
+    if "gsheet_webapp_url" not in merged:
+        merged["gsheet_webapp_url"] = ""
+    if "gsheet_auto_sync" not in merged:
+        merged["gsheet_auto_sync"] = True
     return merged
 
 def save_settings(settings_data):
@@ -667,6 +671,7 @@ def auto_arrange_sheet_by_date(sheet_name, ascending=True):
         ws = wb[sheet_name]
         sort_sheet_records_by_date(ws, ascending=ascending)
         wb.save(FILE)
+        trigger_google_sheet_auto_sync(sheet_name)
         return True
     except PermissionError:
         messagebox.showerror("Permission Error", f"Cannot save '{FILE}' because it is open in Excel.\nPlease close Excel and try again.")
@@ -822,6 +827,8 @@ def sync_month_holidays_and_weekly_offs(target_month=None, clean_re_sync=False, 
     sort_sheet_records_by_date(ws, ascending=asc)
     try:
         wb.save(FILE)
+        if added_holidays > 0 or added_offs > 0:
+            trigger_google_sheet_auto_sync(target_month)
     except PermissionError:
         if not silent:
             messagebox.showerror("Permission Error", f"Cannot save '{FILE}' because it is open in Excel.\nPlease close Excel and try again.")
@@ -952,6 +959,7 @@ def save_work_update(date_str, project, task_title, description, hours, status_v
         sort_sheet_records_by_date(ws)
         try:
             wb.save(FILE)
+            trigger_google_sheet_auto_sync(sheet_name)
             return True
         except PermissionError:
             messagebox.showerror("Permission Error", f"Cannot save '{FILE}' because it is open in Excel.\nPlease close Excel and try again.")
@@ -961,6 +969,7 @@ def save_work_update(date_str, project, task_title, description, hours, status_v
             return False
     else:
         found = False
+        affected_sheets = [sheet_name]
         target_ws = get_or_create_sheet(wb, sheet_name)
         for s_name in wb.sheetnames:
             ws = wb[s_name]
@@ -972,6 +981,7 @@ def save_work_update(date_str, project, task_title, description, hours, status_v
                                           login_time, logout_time, lunch_break, tea_break, now_str])
                         sort_sheet_records_by_date(ws)
                         sort_sheet_records_by_date(target_ws)
+                        affected_sheets = [s_name, sheet_name]
                     else:
                         row[1].value = date_str
                         row[2].value = project
@@ -986,6 +996,7 @@ def save_work_update(date_str, project, task_title, description, hours, status_v
                         ws.cell(row=row_idx, column=12).value = tea_break
                         ws.cell(row=row_idx, column=13).value = now_str
                         sort_sheet_records_by_date(ws)
+                        affected_sheets = [sheet_name]
                     found = True
                     break
             if found:
@@ -998,6 +1009,7 @@ def save_work_update(date_str, project, task_title, description, hours, status_v
 
         try:
             wb.save(FILE)
+            trigger_google_sheet_auto_sync(affected_sheets)
             return True
         except PermissionError:
             messagebox.showerror("Permission Error", f"Cannot save '{FILE}' because it is open in Excel.\nPlease close Excel and try again.")
@@ -1055,6 +1067,7 @@ def save_bulk_work_updates(date_str, project, tasks_list, batch_login="", batch_
     sort_sheet_records_by_date(ws)
     try:
         wb.save(FILE)
+        trigger_google_sheet_auto_sync(sheet_name)
         return saved_count, sheet_name
     except PermissionError:
         messagebox.showerror("Permission Error", f"Cannot save '{FILE}' because it is open in Excel.\nPlease close Excel and try again.")
@@ -1162,6 +1175,7 @@ def save_excel_file_bulk_import(tasks_list, default_proj="General Work"):
 
     try:
         wb.save(FILE)
+        trigger_google_sheet_auto_sync(list(counts_per_sheet.keys()))
         return total_saved, counts_per_sheet
     except PermissionError:
         messagebox.showerror("Permission Error", f"Cannot save '{FILE}' because it is open in Excel.\nPlease close Excel and try again.")
@@ -1180,6 +1194,7 @@ def delete_work_update(record_id, sheet_name):
 
     deleted = False
     sheets_to_check = [sheet_name] if sheet_name in wb.sheetnames else wb.sheetnames
+    deleted_from_sheet = sheet_name
     for s_name in sheets_to_check:
         ws = wb[s_name]
         for row_idx, row in enumerate(ws.iter_rows(min_row=2, values_only=False), start=2):
@@ -1187,6 +1202,7 @@ def delete_work_update(record_id, sheet_name):
                 ws.delete_rows(row_idx)
                 sort_sheet_records_by_date(ws)
                 deleted = True
+                deleted_from_sheet = s_name
                 break
         if deleted:
             break
@@ -1194,6 +1210,7 @@ def delete_work_update(record_id, sheet_name):
     if deleted:
         try:
             wb.save(FILE)
+            trigger_google_sheet_auto_sync(deleted_from_sheet)
         except Exception:
             pass
     return deleted
@@ -1867,6 +1884,112 @@ def sync_google_sheet_all(webapp_url=None, timeout=50):
         settings["gsheet_last_sync"] = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         save_settings(settings)
     return ok, data, code
+
+# ==============================================================================
+# ---------- Google Sheets Auto-Sync Engine & Background Worker ----------
+# ==============================================================================
+
+class GoogleSheetSyncWorker:
+    """
+    Thread-safe, queued, debounced background synchronization engine for Google Sheets.
+    Guarantees:
+    - Never freezes or blocks the UI thread.
+    - Queues and batches rapid changes (multi-task adds, edits, deletes, leaves).
+    - Prevents overlapping concurrent requests to Google Apps Script.
+    - Accurately notifies status bar when WorkPulse app window is running.
+    """
+    _lock = threading.Lock()
+    _dirty_sheets = set()
+    _is_running = False
+    _app_ref = None
+
+    @classmethod
+    def set_app_ref(cls, app_instance):
+        cls._app_ref = app_instance
+
+    @classmethod
+    def queue_sync(cls, sheet_names=None, app_ref=None):
+        """
+        Enqueues sheet(s) for background auto-sync to Google Sheets.
+        `sheet_names` can be None (current month), a single sheet name str, or an iterable of sheet names.
+        """
+        if app_ref:
+            cls._app_ref = app_ref
+
+        settings = load_settings()
+        url = (settings.get("gsheet_webapp_url") or "").strip()
+        auto_sync = settings.get("gsheet_auto_sync", bool(url))
+
+        if not auto_sync or not url:
+            return
+
+        with cls._lock:
+            if not sheet_names:
+                cls._dirty_sheets.add(datetime.datetime.now().strftime("%B %Y"))
+            elif isinstance(sheet_names, str):
+                cls._dirty_sheets.add(sheet_names.strip())
+            else:
+                for s in sheet_names:
+                    if s:
+                        cls._dirty_sheets.add(str(s).strip())
+
+            if not cls._is_running:
+                cls._is_running = True
+                threading.Thread(target=cls._worker_loop, daemon=True).start()
+
+    @classmethod
+    def _worker_loop(cls):
+        while True:
+            target_sheet = None
+            with cls._lock:
+                if not cls._dirty_sheets:
+                    cls._is_running = False
+                    break
+                target_sheet = cls._dirty_sheets.pop()
+
+            if not target_sheet:
+                continue
+
+            cls._notify_ui(f"🔄 Auto-syncing '{target_sheet}' to Google Sheet...", color="#0284c7")
+
+            try:
+                ok, data, code = sync_google_sheet_month(target_sheet)
+                now_str = datetime.datetime.now().strftime("%H:%M:%S")
+                if ok:
+                    cls._notify_ui(f"✅ Auto-synced to Google Sheet ('{target_sheet}') at {now_str}", color="#16a34a")
+                else:
+                    err_msg = data.get("message") if isinstance(data, dict) else str(data)
+                    cls._notify_ui(f"⚠️ Google Sheet sync error: {str(err_msg)[:65]}", color="#dc2626")
+            except Exception as e:
+                cls._notify_ui(f"⚠️ Google Sheet sync error: {str(e)[:65]}", color="#dc2626")
+
+    @classmethod
+    def _notify_ui(cls, msg, color=None):
+        if cls._app_ref:
+            try:
+                if hasattr(cls._app_ref, 'root') and cls._app_ref.root:
+                    cls._app_ref.root.after(0, lambda: cls._safe_status_update(msg, color))
+            except Exception:
+                pass
+
+    @classmethod
+    def _safe_status_update(cls, msg, color=None):
+        try:
+            if cls._app_ref and hasattr(cls._app_ref, 'status') and cls._app_ref.status.winfo_exists():
+                cfg = {"text": msg}
+                if color:
+                    cfg["fg"] = color
+                cls._app_ref.status.config(**cfg)
+        except Exception:
+            pass
+
+def trigger_google_sheet_auto_sync(sheet_names=None, app_ref=None):
+    """
+    Public function called across WorkPulse whenever any record, task, leave,
+    weekend off, or file import modifies Excel data.
+    """
+    GoogleSheetSyncWorker.queue_sync(sheet_names, app_ref=app_ref)
+
 
 # ---------- Markdown / Text Bulk Log Parser ----------
 def extract_task_hours_and_title(raw_title):
@@ -2955,6 +3078,8 @@ class SettingsDialog(tk.Toplevel):
             "gsheet_auto_sync": self.var_gsheet_auto_sync.get() if hasattr(self, 'var_gsheet_auto_sync') else self.settings.get("gsheet_auto_sync", False)
         })
         save_settings(self.settings)
+        if hasattr(self.parent, 'settings') and isinstance(self.parent.settings, dict):
+            self.parent.settings.update(self.settings)
 
         if hasattr(self, 'app_ref') and self.app_ref and hasattr(self.app_ref, 'lan_engine') and self.app_ref.lan_engine:
             self.app_ref.lan_engine.update_profile(self.settings.get("user_name", "Developer"))
@@ -3427,15 +3552,23 @@ class GoogleSheetSyncDialog(tk.Toplevel):
     def save_url_only(self):
         url = self.entry_url.get().strip()
         self.settings["gsheet_webapp_url"] = url
+        if not self.settings.get("gsheet_auto_sync", False):
+            self.settings["gsheet_auto_sync"] = True
+            if hasattr(self, 'var_auto_sync'):
+                self.var_auto_sync.set(True)
         save_settings(self.settings)
+        if hasattr(self.parent, 'settings') and isinstance(self.parent.settings, dict):
+            self.parent.settings.update(self.settings)
         self.log_message(f"Saved Web App URL: {url[:50]}...")
         self.lbl_conn_status.config(text="Saved! Ready to test connection.", fg="#047857")
-        messagebox.showinfo("Saved", "Google Sheet Web App URL saved successfully!")
+        messagebox.showinfo("Saved", "Google Sheet Web App URL saved successfully!\nAuto-sync is enabled.")
 
     def toggle_auto_sync(self):
         val = self.var_auto_sync.get()
         self.settings["gsheet_auto_sync"] = val
         save_settings(self.settings)
+        if hasattr(self.parent, 'settings') and isinstance(self.parent.settings, dict):
+            self.parent.settings["gsheet_auto_sync"] = val
         status_str = "ENABLED" if val else "DISABLED"
         self.log_message(f"Auto-Sync on Save/Edit/Delete is now {status_str}.")
 
@@ -3943,7 +4076,12 @@ class AddLeaveDialog(tk.Toplevel):
         self.configure(bg="#f8fafc")
         self.transient(parent)
         self.grab_set()
-        center_window(self, parent, default_w=590, default_h=650, min_w=530, min_h=560)
+        center_window(self, parent, default_w=580, default_h=570, min_w=500, min_h=460)
+
+        # Quick keyboard shortcuts
+        self.bind("<Return>", lambda e: self.submit_leave())
+        self.bind("<KP_Enter>", lambda e: self.submit_leave())
+        self.bind("<Escape>", lambda e: self.destroy())
 
         self.initial_date = default_date or datetime.datetime.now().strftime("%Y-%m-%d")
         self.settings = load_settings()
@@ -3953,30 +4091,64 @@ class AddLeaveDialog(tk.Toplevel):
 
     def create_widgets(self):
         # Header banner
-        header = tk.Frame(self, bg="#1e293b", height=52)
+        header = tk.Frame(self, bg="#1e293b", height=46)
         header.pack(fill=tk.X, side=tk.TOP)
         header.pack_propagate(False)
 
         h_title_box = tk.Frame(header, bg="#1e293b")
-        h_title_box.pack(side=tk.LEFT, padx=15, pady=8)
-        tk.Label(h_title_box, text="🌴 Add / Record Leave", font=("Segoe UI", 12, "bold"), fg="white", bg="#1e293b").pack(anchor="w")
+        h_title_box.pack(side=tk.LEFT, padx=15, pady=6)
+        tk.Label(h_title_box, text="🌴 Add / Record Leave", font=("Segoe UI", 11, "bold"), fg="white", bg="#1e293b").pack(anchor="w")
         tk.Label(h_title_box, text="Record single or multi-day leaves into your monthly Excel sheet", font=("Segoe UI", 8), fg="#94a3b8", bg="#1e293b").pack(anchor="w")
 
-        # Main container
-        main_f = tk.Frame(self, bg="#ffffff", padx=16, pady=12, bd=1, relief="solid")
-        main_f.pack(fill=tk.BOTH, expand=True, padx=12, pady=10)
+        # Bottom Actions Bar (Pack side=tk.BOTTOM FIRST so it is ALWAYS permanently visible)
+        bottom_bar = tk.Frame(self, bg="#f1f5f9", padx=14, pady=8)
+        bottom_bar.pack(fill=tk.X, side=tk.BOTTOM)
+
+        btn_confirm = tk.Button(
+            bottom_bar,
+            text="💾 Confirm & Record Leave (Enter)",
+            font=("Segoe UI", 9, "bold"),
+            bg="#16a34a",
+            fg="white",
+            activebackground="#15803d",
+            activeforeground="white",
+            relief="flat",
+            padx=14,
+            pady=6,
+            cursor="hand2",
+            command=self.submit_leave
+        )
+        btn_confirm.pack(side=tk.RIGHT, padx=4)
+
+        btn_cancel = tk.Button(
+            bottom_bar,
+            text="Cancel (Esc)",
+            font=("Segoe UI", 9),
+            bg="#e2e8f0",
+            fg="#475569",
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            command=self.destroy
+        )
+        btn_cancel.pack(side=tk.RIGHT, padx=4)
+
+        # Main container (Packed in middle between header and bottom_bar)
+        main_f = tk.Frame(self, bg="#ffffff", padx=14, pady=8, bd=1, relief="solid")
+        main_f.pack(fill=tk.BOTH, expand=True, padx=10, pady=(6, 4))
 
         # 1. Leave Mode Card
-        mode_box = tk.LabelFrame(main_f, text="  1. Leave Mode  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=6, bd=1, relief="solid")
-        mode_box.pack(fill=tk.X, pady=(0, 8))
+        mode_box = tk.LabelFrame(main_f, text="  1. Leave Mode  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=4, bd=1, relief="solid")
+        mode_box.pack(fill=tk.X, pady=(0, 6))
 
         self.var_mode = tk.StringVar(value="single")
         tk.Radiobutton(mode_box, text="📅 Single Day Leave", value="single", variable=self.var_mode, font=("Segoe UI", 9, "bold"), bg="#ffffff", fg="#1e293b", command=self.on_mode_change).pack(side=tk.LEFT, padx=(0, 20))
         tk.Radiobutton(mode_box, text="📆 Date Range (Multiple Days)", value="range", variable=self.var_mode, font=("Segoe UI", 9, "bold"), bg="#ffffff", fg="#1e293b", command=self.on_mode_change).pack(side=tk.LEFT)
 
         # 2. Date Selection Card
-        self.date_box = tk.LabelFrame(main_f, text="  2. Date Selection  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=8, bd=1, relief="solid")
-        self.date_box.pack(fill=tk.X, pady=(0, 8))
+        self.date_box = tk.LabelFrame(main_f, text="  2. Date Selection  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=6, bd=1, relief="solid")
+        self.date_box.pack(fill=tk.X, pady=(0, 6))
 
         # Container for Single Day
         self.f_single_date = tk.Frame(self.date_box, bg="#ffffff")
@@ -4034,8 +4206,8 @@ class AddLeaveDialog(tk.Toplevel):
         chk_skip.pack(anchor="w", pady=(4, 0))
 
         # 3. Leave Type & Hours Card
-        details_box = tk.LabelFrame(main_f, text="  3. Leave Type & Hours  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=8, bd=1, relief="solid")
-        details_box.pack(fill=tk.X, pady=(0, 8))
+        details_box = tk.LabelFrame(main_f, text="  3. Leave Type & Hours  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=6, bd=1, relief="solid")
+        details_box.pack(fill=tk.X, pady=(0, 6))
 
         row_type = tk.Frame(details_box, bg="#ffffff")
         row_type.pack(fill=tk.X)
@@ -4068,11 +4240,11 @@ class AddLeaveDialog(tk.Toplevel):
         self.entry_hours.insert(0, "0.0")
 
         # 4. Reason / Notes
-        reason_box = tk.LabelFrame(main_f, text="  4. Reason / Notes (Optional)  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=8, bd=1, relief="solid")
-        reason_box.pack(fill=tk.X, pady=(0, 8))
+        reason_box = tk.LabelFrame(main_f, text="  4. Reason / Notes (Optional)  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#ffffff", padx=10, pady=6, bd=1, relief="solid")
+        reason_box.pack(fill=tk.X, pady=(0, 6))
 
         self.entry_reason = tk.Entry(reason_box, font=("Segoe UI", 9), relief="solid", bd=1)
-        self.entry_reason.pack(fill=tk.X, ipady=2, pady=(0, 4))
+        self.entry_reason.pack(fill=tk.X, ipady=2, pady=(0, 3))
         self.entry_reason.insert(0, "Personal Work")
 
         # Reason quick pill buttons
@@ -4084,21 +4256,11 @@ class AddLeaveDialog(tk.Toplevel):
             btn_qr.pack(side=tk.LEFT, padx=(0, 4))
 
         # 5. Live Summary Preview Card
-        self.prev_box = tk.LabelFrame(main_f, text="  5. Dates Preview  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#f8fafc", padx=10, pady=6, bd=1, relief="solid")
-        self.prev_box.pack(fill=tk.BOTH, expand=True, pady=(0, 4))
+        self.prev_box = tk.LabelFrame(main_f, text="  5. Dates Preview  ", font=("Segoe UI", 9, "bold"), fg="#1e40af", bg="#f8fafc", padx=10, pady=4, bd=1, relief="solid")
+        self.prev_box.pack(fill=tk.BOTH, expand=True, pady=(0, 2))
 
-        self.lbl_preview = tk.Label(self.prev_box, text="", font=("Segoe UI", 9), bg="#f8fafc", fg="#334155", justify="left", anchor="nw")
+        self.lbl_preview = tk.Label(self.prev_box, text="", font=("Segoe UI", 8), bg="#f8fafc", fg="#334155", justify="left", anchor="nw")
         self.lbl_preview.pack(fill=tk.BOTH, expand=True)
-
-        # Bottom Actions Bar
-        bottom_bar = tk.Frame(self, bg="#f1f5f9", padx=15, pady=10)
-        bottom_bar.pack(fill=tk.X, side=tk.BOTTOM)
-
-        btn_confirm = tk.Button(bottom_bar, text="💾 Confirm & Record Leave", font=("Segoe UI", 9, "bold"), bg="#16a34a", fg="white", activebackground="#15803d", activeforeground="white", relief="flat", padx=14, pady=6, cursor="hand2", command=self.submit_leave)
-        btn_confirm.pack(side=tk.RIGHT, padx=4)
-
-        btn_cancel = tk.Button(bottom_bar, text="Cancel", font=("Segoe UI", 9), bg="#e2e8f0", fg="#475569", relief="flat", padx=12, pady=6, cursor="hand2", command=self.destroy)
-        btn_cancel.pack(side=tk.RIGHT, padx=4)
 
     def on_mode_change(self):
         if self.var_mode.get() == "single":
@@ -4288,6 +4450,8 @@ class AddLeaveDialog(tk.Toplevel):
         except PermissionError:
             messagebox.showerror("Permission Error", f"Cannot save '{FILE}' because it is open in Excel.\nPlease close Excel and try again.")
             return
+
+        trigger_google_sheet_auto_sync(affected_sheets)
 
         if self.on_success_callback:
             self.on_success_callback()
@@ -5811,6 +5975,7 @@ class TodayWorkUpdateApp:
         # LAN Team Chat System initialization
         self.root.app_instance = self
         self.settings = load_settings()
+        GoogleSheetSyncWorker.set_app_ref(self)
         self.unread_lan_messages = 0
         self.chat_dialog = None
         self.lan_engine = LANChatEngine(
@@ -6871,20 +7036,7 @@ class TodayWorkUpdateApp:
                 threading.Thread(target=_trigger_api_webhook, args=(api_payload, action_type), daemon=True).start()
 
             # Google Sheet Auto-Sync Trigger
-            if settings.get("gsheet_auto_sync", False) and settings.get("gsheet_webapp_url"):
-                target_m = target_month
-                def _trigger_gsheet_sync(m_name):
-                    ok, data, code = sync_google_sheet_month(m_name)
-                    if ok:
-                        self.root.after(0, lambda: self.status.config(
-                            text=f"✅ Saved & Auto-synced to Google Sheet ('{m_name}') at {datetime.datetime.now().strftime('%H:%M:%S')}"
-                        ))
-                    else:
-                        msg = data.get("message") if isinstance(data, dict) else str(data)
-                        self.root.after(0, lambda: self.status.config(
-                            text=f"⚠️ Saved locally, but Google Sheet sync failed: {str(msg)[:60]}"
-                        ))
-                threading.Thread(target=_trigger_gsheet_sync, args=(target_m,), daemon=True).start()
+            trigger_google_sheet_auto_sync(target_month, app_ref=self)
 
             self.clear_form()
 
@@ -7006,9 +7158,7 @@ class TodayWorkUpdateApp:
                 threading.Thread(target=lambda: send_data_api_webhook(del_payload), daemon=True).start()
 
             # Google Sheet Auto-Sync on Delete
-            if settings.get("gsheet_auto_sync", False) and settings.get("gsheet_webapp_url"):
-                target_m = current_month
-                threading.Thread(target=lambda: sync_google_sheet_month(target_m), daemon=True).start()
+            trigger_google_sheet_auto_sync(current_month, app_ref=self)
         else:
             messagebox.showerror("Error", "Could not delete record. Please check file permissions.")
 

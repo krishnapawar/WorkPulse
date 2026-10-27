@@ -231,7 +231,7 @@
         }
     },
     "recent_teammates": [],
-    "data_api_url": "http://127.0.0.1:8000/api/save-json",
+    "data_api_url": "",
     "data_api_token": "",
     "data_api_sync_on_edit": true,
     "data_api_sync_on_create": true,
@@ -240,5 +240,5 @@
     "lan_chat_port": 45454,
     "gsheet_webapp_url": "https://script.google.com/macros/s/AKfycbz8jozAw0xCM9FrKwhpizwlqaIeRV8YPklz2eHu-t6zuYR9O_Mlhkjtg28cIibc4S2r/exec",
     "gsheet_auto_sync": true,
-    "gsheet_last_sync": "2026-10-28 01:19:48"
+    "gsheet_last_sync": "2026-10-28 02:04:46"
 }
