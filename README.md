@@ -8,6 +8,7 @@ A feature-packed desktop work log, shift tracker, and team reporting tool built 
 
 * **⏱️ Shift & Break Tracker**: Log daily Login, Logout, Lunch Break, and Tea Break times. Automatically computes net working hours minus breaks.
 * **📊 Month-Wise Excel Logger**: Tasks are saved chronologically in distinct monthly sheets (e.g., `October 2026`, `November 2026`).
+* **⏱️ Monthly 8-Hour Day Metrics**: Real-time stats bar tracking monthly count of days meeting standard 8 hours (`⏱️ ≥ 8h Days`) and short work days (`⏳ < 8h Days`). Clicking either metric opens a detailed date-wise breakdown dialog.
 * **🌐 Custom REST API / Webhook Integration**:
   * **Real-time Auto-Sync**: Automatically sends a structured JSON payload to your custom API / Webhook endpoint whenever a task is **Edited**, **Updated**, **Created**, or **Deleted**.
   * **"Sync to API" Button**: One-click bulk sync to push all historical records across all months to your API endpoint.
@@ -46,7 +47,21 @@ run.bat
 ```
 *(The launcher automatically verifies dependencies, installs `openpyxl` if missing, and starts the application).*
 
-#### Option B: Via Command Prompt or PowerShell
+#### Option B: 1-Click Desktop & Start Menu App Installer
+Double-click:
+```bat
+install_windows_app.bat
+```
+*(Automatically creates high-resolution shortcuts on your **Desktop** and **Start Menu** with the custom WorkPulse icon. You can right-click the shortcut to **"Pin to Taskbar"**).*
+
+#### Option C: Build Standalone Windows Executable (`.exe`)
+Double-click:
+```bat
+build_windows_exe.bat
+```
+*(Packages Python, Tkinter, `openpyxl`, and all assets into a single standalone **`dist\WorkPulse.exe`** file. You can distribute this single file to any Windows machine—no Python or command line needed).*
+
+#### Option D: Via Command Prompt or PowerShell
 1. Open Command Prompt or PowerShell in the project directory:
    ```powershell
    cd path\to\myTodayWorkupdate
@@ -124,6 +139,20 @@ chmod +x run.sh
 ./run.sh
 ```
 
+**Install as Native Ubuntu Application (App Menu & Dock):**
+```bash
+chmod +x install_ubuntu_app.sh
+./install_ubuntu_app.sh
+```
+*(Installs high-resolution icons, creates desktop shortcut, and makes WorkPulse searchable in Ubuntu Dash / "Show Applications" so you can pin it to your Ubuntu Dock)*
+
+**Build an Installable `.deb` Package for Ubuntu / Debian:**
+```bash
+chmod +x build_deb.sh
+./build_deb.sh
+sudo dpkg -i dist/workpulse_1.0.0_all.deb
+```
+
 **Or using Python Virtual Environment:**
 ```bash
 python3 -m venv venv
@@ -131,6 +160,36 @@ source venv/bin/activate
 pip install -r requirements.txt
 python3 app.py
 ```
+
+---
+
+### 🤖 4. Android (APK)
+
+WorkPulse includes full support for building an Android mobile APK (`.apk`) using [Buildozer](https://buildozer.readthedocs.io/) and GitHub Actions.
+
+#### Method A: 1-Click Cloud Build with GitHub Actions (Recommended - Zero Setup)
+1. Push your code to your GitHub repository:
+   ```bash
+   git push origin main
+   ```
+2. In your GitHub repository, navigate to the **Actions** tab.
+3. Select the **Build Android APK** workflow and click **Run workflow**.
+4. GitHub's cloud runners will automatically compile the APK and attach `WorkPulse-Android-APK` as a downloadable artifact in ~5-10 minutes.
+5. Download the `.apk` directly to your Android device and tap to install!
+
+#### Method B: Local Build via Buildozer (Ubuntu / Linux)
+1. Run the included builder script:
+   ```bash
+   chmod +x build_apk.sh
+   ./build_apk.sh
+   ```
+   *(Automatically installs OpenJDK 17, Cython, and Buildozer, downloads the Android SDK/NDK, and generates `dist/workpulse-1.0.0-arm64-v8a-debug.apk`).*
+
+2. Install on your Android phone:
+   ```bash
+   adb install dist/*.apk
+   ```
+   *Or send the `.apk` to your phone via Google Drive, WhatsApp, or USB cable.*
 
 ---
 

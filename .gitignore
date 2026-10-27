@@ -10,7 +10,10 @@ __pycache__/
 .Python
 build/
 develop-eggs/
-dist/
+dist/*
+!dist/*.deb
+!dist/*.exe
+!dist/*.apk
 downloads/
 eggs/
 .eggs/
@@ -29,6 +32,9 @@ venv/
 env/
 ENV/
 .venv/
+.venv*/
+.buildozer/
+bin/
 
 # IDE files
 .vscode/

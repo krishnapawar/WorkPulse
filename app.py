@@ -17,6 +17,7 @@ from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
+from collections import defaultdict
 from lan_chat import LANChatEngine, LANChatDialog
 
 def open_file_externally(filepath):
@@ -543,8 +544,8 @@ def restyle_all_rows_in_sheet(ws):
     holiday_fill = PatternFill(start_color="FEF3C7", end_color="FEF3C7", fill_type="solid")
     holiday_font = Font(name="Calibri", size=10, bold=True, color="92400E")
 
-    weekly_off_fill = PatternFill(start_color="F1F5F9", end_color="F1F5F9", fill_type="solid")
-    weekly_off_font = Font(name="Calibri", size=10, italic=True, color="475569")
+    weekly_off_fill = PatternFill(start_color="DBEAFE", end_color="DBEAFE", fill_type="solid")
+    weekly_off_font = Font(name="Calibri", size=10, bold=True, color="1E40AF")
 
     leave_fill = PatternFill(start_color="FCE7F3", end_color="FCE7F3", fill_type="solid")
     leave_font = Font(name="Calibri", size=10, bold=True, color="9D174D")
@@ -555,9 +556,14 @@ def restyle_all_rows_in_sheet(ws):
     for row_idx in range(2, ws.max_row + 1):
         status_val = str(ws.cell(row=row_idx, column=7).value or "").strip()
         proj_val = str(ws.cell(row=row_idx, column=3).value or "").strip()
-        is_holiday = ("holiday" in status_val.lower() or "holiday" in proj_val.lower())
-        is_weekly_off = ("weekly off" in status_val.lower() or "weekly off" in proj_val.lower() or "weekend" in status_val.lower())
-        is_leave = ("leave" in status_val.lower() or "leave" in proj_val.lower())
+        title_val = str(ws.cell(row=row_idx, column=4).value or "").strip()
+        st_lower = status_val.lower()
+        pj_lower = proj_val.lower()
+        tt_lower = title_val.lower()
+
+        is_holiday = ("holiday" in st_lower or "holiday" in pj_lower or "holiday" in tt_lower)
+        is_weekly_off = ("weekly off" in st_lower or "weekly off" in pj_lower or "weekly off" in tt_lower or "weekend" in st_lower or "weekend" in pj_lower)
+        is_leave = ("leave" in st_lower or "leave" in pj_lower or "leave" in tt_lower)
 
         ws.row_dimensions[row_idx].height = 24
 
@@ -1347,6 +1353,30 @@ def generate_team_markdown(date_str, project, tasks_list, user_name="Developer",
     else:
         if has_any_hrs and total_hrs > 0:
             md.append(f"**Total Hours:** {format_duration_display(total_hrs)}")
+
+    # Distinct dates summary for monthly view
+    distinct_dates = set()
+    daily_h = defaultdict(float)
+    daily_off = set()
+    for t in tasks_list:
+        d_val = t.get("date")
+        if d_val:
+            distinct_dates.add(d_val)
+            h_str = str(t.get("hours", "") or "").replace(" hrs", "").strip()
+            try:
+                h_f = float(h_str)
+            except Exception:
+                h_f = 0.0
+            daily_h[d_val] += h_f
+            st_l = str(t.get("status") or "").lower()
+            pj_l = str(t.get("project") or "").lower()
+            if "weekly off" in st_l or "weekly off" in pj_l or "holiday" in st_l or "holiday" in pj_l:
+                daily_off.add(d_val)
+
+    if len(distinct_dates) > 1:
+        gte_8_cnt = sum(1 for d, h in daily_h.items() if h >= 8.0)
+        lt_8_cnt = sum(1 for d, h in daily_h.items() if (0 < h < 8.0 and d not in daily_off))
+        md.append(f"**Monthly Working Days:** **≥ 8 Hours:** {gte_8_cnt} days | **< 8 Hours:** {lt_8_cnt} days")
 
     md.append("\n---\n")
 
@@ -5069,6 +5099,24 @@ class TodayWorkUpdateApp:
         self.root.title("Today's Work Update - Month-Wise Excel Logger & Shift Tracker")
         self.root.configure(bg="#f4f6f9")
 
+        # Set Native Desktop Window Icon (Windows .ico and Linux/macOS .png)
+        icon_ico = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.ico")
+        icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon_128.png")
+        if not os.path.exists(icon_path):
+            icon_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "assets", "icon.png")
+
+        if sys.platform.startswith("win") and os.path.exists(icon_ico):
+            try:
+                self.root.iconbitmap(default=icon_ico)
+            except Exception:
+                pass
+        if os.path.exists(icon_path):
+            try:
+                self._app_icon = tk.PhotoImage(file=icon_path)
+                self.root.iconphoto(True, self._app_icon)
+            except Exception:
+                pass
+
         # Dynamically auto-adjust window size according to screen dimensions
         screen_w = self.root.winfo_screenwidth()
         screen_h = self.root.winfo_screenheight()
@@ -5207,13 +5255,25 @@ class TodayWorkUpdateApp:
         self.lbl_stat_hours.pack(side=tk.LEFT, padx=12, pady=7)
 
         self.lbl_stat_completed = tk.Label(self.stats_frame, text="Completed: 0", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#2e7d32")
-        self.lbl_stat_completed.pack(side=tk.LEFT, padx=12, pady=7)
+        self.lbl_stat_completed.pack(side=tk.LEFT, padx=6, pady=7)
+
+        self.lbl_stat_gte_8h = tk.Label(self.stats_frame, text="⏱️ ≥ 8h Days: 0", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#15803d", cursor="hand2")
+        self.lbl_stat_gte_8h.pack(side=tk.LEFT, padx=6, pady=7)
+        self.lbl_stat_gte_8h.bind("<Button-1>", lambda e: self.show_gte_8h_details())
+        self.lbl_stat_gte_8h.bind("<Enter>", lambda e: self.status.config(text=f"⏱️ {len(getattr(self, 'current_gte_8_dates', []))} days with ≥ 8.0 working hours in {self.current_selected_month.get()} (Click to view detailed date list)"))
+        self.lbl_stat_gte_8h.bind("<Leave>", lambda e: self.status.config(text="Ready"))
+
+        self.lbl_stat_lt_8h = tk.Label(self.stats_frame, text="⏳ < 8h Days: 0", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#c2410c", cursor="hand2")
+        self.lbl_stat_lt_8h.pack(side=tk.LEFT, padx=6, pady=7)
+        self.lbl_stat_lt_8h.bind("<Button-1>", lambda e: self.show_lt_8h_details())
+        self.lbl_stat_lt_8h.bind("<Enter>", lambda e: self.status.config(text=f"⏳ {len(getattr(self, 'current_lt_8_dates', []))} days with < 8.0 working hours in {self.current_selected_month.get()} (Click to view detailed date list)"))
+        self.lbl_stat_lt_8h.bind("<Leave>", lambda e: self.status.config(text="Ready"))
 
         self.lbl_stat_leaves = tk.Label(self.stats_frame, text="🌴 Leaves: 0", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#be185d")
-        self.lbl_stat_leaves.pack(side=tk.LEFT, padx=12, pady=7)
+        self.lbl_stat_leaves.pack(side=tk.LEFT, padx=6, pady=7)
 
         self.lbl_stat_lan = tk.Label(self.stats_frame, text="💬 LAN: 0 online", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#4f46e5", cursor="hand2")
-        self.lbl_stat_lan.pack(side=tk.LEFT, padx=12, pady=7)
+        self.lbl_stat_lan.pack(side=tk.LEFT, padx=6, pady=7)
         self.lbl_stat_lan.bind("<Button-1>", lambda e: self.open_lan_chat())
 
         # Shift summary on top right
@@ -5554,7 +5614,7 @@ class TodayWorkUpdateApp:
 
         # Treeview tag styling for holidays, weekly offs, and leaves
         self.tree.tag_configure("holiday", background="#fef9c3", foreground="#854d0e")
-        self.tree.tag_configure("weekly_off", background="#f1f5f9", foreground="#475569")
+        self.tree.tag_configure("weekly_off", background="#dbeafe", foreground="#1e40af")
         self.tree.tag_configure("leave", background="#fce7f3", foreground="#9d174d")
         self.tree.tag_configure("normal", background="#ffffff", foreground="#0f172a")
 
@@ -5858,6 +5918,7 @@ class TodayWorkUpdateApp:
                 if proj:
                     default_proj = proj
                 month_tasks.append({
+                    "date": format_date_only(r[1]),
                     "title": str(r[3] or "Task"),
                     "desc": str(r[4] or ""),
                     "hours": str(r[5] or "") if r[5] is not None and str(r[5]) != "-" else "",
@@ -6348,6 +6409,10 @@ class TodayWorkUpdateApp:
         total_hours = 0.0
         completed_count = 0
         leave_count = 0
+        daily_hours_map = defaultdict(float)
+        daily_meta = defaultdict(lambda: {
+            "has_work": False, "is_off": False, "is_holiday": False, "is_leave": False, "task_count": 0
+        })
 
         records_to_display = list(getattr(self, "raw_records", []))
         sort_col = getattr(self, "tree_sort_col", "Date")
@@ -6419,27 +6484,49 @@ class TodayWorkUpdateApp:
                 continue
 
             total_tasks += 1
+            h_float = 0.0
             if r_hours:
                 try:
-                    total_hours += float(r_hours)
+                    h_float = float(r_hours)
                 except Exception:
-                    pass
+                    h_float, _ = parse_duration_to_hours(r_hours)
+                total_hours += h_float
+
             if r_status == "Completed":
                 completed_count += 1
             if "leave" in r_status.lower() or "leave" in r_proj.lower():
                 leave_count += 1
 
+            norm_date = format_date_only(r_date)
+            st_lower = r_status.lower()
+            pj_lower = r_proj.lower()
+            tt_lower = r_title.lower()
+            is_w_off = ("weekly off" in st_lower or "weekly off" in pj_lower or "weekly off" in tt_lower or "weekend" in st_lower or "weekend" in pj_lower)
+            is_hol = ("holiday" in st_lower or "holiday" in pj_lower or "holiday" in tt_lower)
+            is_lv = ("leave" in st_lower or "leave" in pj_lower or "leave" in tt_lower)
+
+            if norm_date:
+                daily_hours_map[norm_date] += h_float
+                m = daily_meta[norm_date]
+                m["task_count"] += 1
+                if is_w_off:
+                    m["is_off"] = True
+                elif is_hol:
+                    m["is_holiday"] = True
+                elif is_lv:
+                    m["is_leave"] = True
+                else:
+                    m["has_work"] = True
+
             display_hours = r_hours if r_hours else "-"
 
             # Visual tag styling
             tag = "normal"
-            st_lower = r_status.lower()
-            pj_lower = r_proj.lower()
-            if "holiday" in st_lower or "holiday" in pj_lower:
+            if is_hol:
                 tag = "holiday"
-            elif "weekly off" in st_lower or "weekly off" in pj_lower or "weekend" in st_lower:
+            elif is_w_off:
                 tag = "weekly_off"
-            elif "leave" in st_lower or "leave" in pj_lower:
+            elif is_lv:
                 tag = "leave"
 
             self.tree.insert("", tk.END, values=(
@@ -6448,10 +6535,37 @@ class TodayWorkUpdateApp:
                 r_desc, r_remarks
             ), tags=(tag,))
 
+        # Evaluate monthly 8-hour day metrics
+        days_gte_8 = 0
+        days_lt_8 = 0
+        gte_8_dates = []
+        lt_8_dates = []
+
+        for d_str, d_hours in sorted(daily_hours_map.items()):
+            m = daily_meta[d_str]
+            if d_hours >= 8.0:
+                days_gte_8 += 1
+                gte_8_dates.append((d_str, d_hours))
+            else:
+                # Count days with work logged less than 8 hours, excluding purely off/holiday/full-leave days
+                if m["has_work"] or (d_hours > 0 and not m["is_off"] and not m["is_holiday"]):
+                    days_lt_8 += 1
+                    lt_8_dates.append((d_str, d_hours))
+                elif not m["is_off"] and not m["is_holiday"] and not m["is_leave"] and m["task_count"] > 0:
+                    days_lt_8 += 1
+                    lt_8_dates.append((d_str, d_hours))
+
+        self.current_gte_8_dates = gte_8_dates
+        self.current_lt_8_dates = lt_8_dates
+
         self.lbl_stat_month.config(text=f"📁 Month: {self.current_selected_month.get()}")
         self.lbl_stat_tasks.config(text=f"Total Tasks: {total_tasks}")
         self.lbl_stat_hours.config(text=f"Total Hours: {total_hours:.1f} hrs")
         self.lbl_stat_completed.config(text=f"Completed: {completed_count}")
+        if hasattr(self, "lbl_stat_gte_8h"):
+            self.lbl_stat_gte_8h.config(text=f"⏱️ ≥ 8h Days: {days_gte_8}")
+        if hasattr(self, "lbl_stat_lt_8h"):
+            self.lbl_stat_lt_8h.config(text=f"⏳ < 8h Days: {days_lt_8}")
         if hasattr(self, "lbl_stat_leaves"):
             self.lbl_stat_leaves.config(text=f"🌴 Leaves: {leave_count}")
 
@@ -6476,6 +6590,42 @@ class TodayWorkUpdateApp:
             self.lbl_stat_shift.config(text=" | ".join(shift_parts))
         else:
             self.lbl_stat_shift.config(text="")
+
+    def show_gte_8h_details(self):
+        month_name = self.current_selected_month.get() or "Current Month"
+        dates = getattr(self, "current_gte_8_dates", [])
+        if not dates:
+            messagebox.showinfo("≥ 8 Hours Work Days", f"No days with ≥ 8.0 hours found in {month_name}.")
+            return
+        lines = []
+        for d, h in dates:
+            try:
+                dt = datetime.datetime.strptime(d, "%Y-%m-%d")
+                wday = dt.strftime("%a")
+                lines.append(f"• {d} ({wday}): {h:.2f} hrs")
+            except Exception:
+                lines.append(f"• {d}: {h:.2f} hrs")
+        count = len(dates)
+        detail_msg = f"📁 Month: {month_name}\n⏱️ Total Days with ≥ 8.0 Hours: {count} days\n\n" + "\n".join(lines)
+        messagebox.showinfo(f"≥ 8 Hours Days ({count}) - {month_name}", detail_msg)
+
+    def show_lt_8h_details(self):
+        month_name = self.current_selected_month.get() or "Current Month"
+        dates = getattr(self, "current_lt_8_dates", [])
+        if not dates:
+            messagebox.showinfo("< 8 Hours Work Days", f"No days with < 8.0 hours found in {month_name}.")
+            return
+        lines = []
+        for d, h in dates:
+            try:
+                dt = datetime.datetime.strptime(d, "%Y-%m-%d")
+                wday = dt.strftime("%a")
+                lines.append(f"• {d} ({wday}): {h:.2f} hrs")
+            except Exception:
+                lines.append(f"• {d}: {h:.2f} hrs")
+        count = len(dates)
+        detail_msg = f"📁 Month: {month_name}\n⏳ Total Days with < 8.0 Hours: {count} days\n\n" + "\n".join(lines)
+        messagebox.showinfo(f"< 8 Hours Days ({count}) - {month_name}", detail_msg)
 
     def open_excel_file(self):
         if not os.path.exists(FILE):
