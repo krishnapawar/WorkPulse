@@ -18,7 +18,7 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from collections import defaultdict
-from lan_chat import LANChatEngine, LANChatDialog
+from lan_chat import LANChatEngine, LANChatDialog, font_spec, show_desktop_notification, show_in_app_toast
 
 def open_file_externally(filepath):
     """Open a file with the default system application across Windows, macOS, and Linux."""
@@ -6012,11 +6012,11 @@ class TodayWorkUpdateApp:
         style = ttk.Style()
         style.theme_use("clam")
 
-        style.configure("Treeview.Heading", font=("Segoe UI", 9, "bold"), background="#1f4e79", foreground="white", relief="flat")
+        style.configure("Treeview.Heading", font=font_spec(10, "bold"), background="#1f4e79", foreground="white", relief="flat")
         style.map("Treeview.Heading", background=[('active', '#163b5c')])
-        style.configure("Treeview", font=("Segoe UI", 9), rowheight=28, fieldbackground="white", background="white")
+        style.configure("Treeview", font=font_spec(10), rowheight=28, fieldbackground="white", background="white")
         style.map("Treeview", background=[('selected', '#d0e1fd')], foreground=[('selected', '#0d233a')])
-        style.configure("TCombobox", padding=4, font=("Segoe UI", 9))
+        style.configure("TCombobox", padding=4, font=font_spec(10))
 
     def create_header(self):
         header_frame = tk.Frame(self.root, bg="#1a365d")
@@ -6025,10 +6025,10 @@ class TodayWorkUpdateApp:
         title_box = tk.Frame(header_frame, bg="#1a365d")
         title_box.pack(side=tk.LEFT, padx=(18, 10), pady=10)
 
-        title_lbl = tk.Label(title_box, text="📝 Today Work Update Manager", font=("Segoe UI", 15, "bold"), fg="#ffffff", bg="#1a365d")
+        title_lbl = tk.Label(title_box, text="📝 Today Work Update Manager", font=font_spec(15, "bold"), fg="#ffffff", bg="#1a365d")
         title_lbl.pack(anchor="w")
 
-        sub_lbl = tk.Label(title_box, text="Shift Tracker • Month-Wise Excel Logger • Auto-Arranging", font=("Segoe UI", 8), fg="#90cdf4", bg="#1a365d")
+        sub_lbl = tk.Label(title_box, text="Shift Tracker • Month-Wise Excel Logger • Auto-Arranging", font=font_spec(10), fg="#90cdf4", bg="#1a365d")
         sub_lbl.pack(anchor="w")
 
         # Header Right Controls (2-Row compact grid: fits gracefully on all screens)
@@ -6039,20 +6039,20 @@ class TodayWorkUpdateApp:
         r1 = tk.Frame(right_box, bg="#1a365d")
         r1.pack(anchor="e", pady=(0, 3))
 
-        btn_share = tk.Button(r1, text="📢 Share with Team", font=("Segoe UI", 8, "bold"), bg="#8b5cf6", fg="white", activebackground="#7c3aed", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.share_current_view_with_team)
-        btn_share.pack(side=tk.LEFT, padx=2)
+        btn_share = tk.Button(r1, text="📢 Share with Team", font=font_spec(10, "bold"), bg="#8b5cf6", fg="white", activebackground="#7c3aed", activeforeground="white", relief="flat", padx=10, pady=3, cursor="hand2", command=self.share_current_view_with_team)
+        btn_share.pack(side=tk.LEFT, padx=3)
 
-        self.btn_chat = tk.Button(r1, text="💬 LAN Chat", font=("Segoe UI", 8, "bold"), bg="#4f46e5", fg="white", activebackground="#4338ca", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_lan_chat)
-        self.btn_chat.pack(side=tk.LEFT, padx=2)
+        self.btn_chat = tk.Button(r1, text="💬 LAN Chat", font=font_spec(10, "bold"), bg="#4f46e5", fg="white", activebackground="#4338ca", activeforeground="white", relief="flat", padx=10, pady=3, cursor="hand2", command=self.open_lan_chat)
+        self.btn_chat.pack(side=tk.LEFT, padx=3)
 
-        btn_import_excel = tk.Button(r1, text="📂 Import Excel", font=("Segoe UI", 8, "bold"), bg="#059669", fg="white", activebackground="#047857", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_excel_bulk_import_dialog)
-        btn_import_excel.pack(side=tk.LEFT, padx=2)
+        btn_import_excel = tk.Button(r1, text="📂 Import Excel", font=font_spec(10, "bold"), bg="#059669", fg="white", activebackground="#047857", activeforeground="white", relief="flat", padx=10, pady=3, cursor="hand2", command=self.open_excel_bulk_import_dialog)
+        btn_import_excel.pack(side=tk.LEFT, padx=3)
 
-        btn_bulk = tk.Button(r1, text="📋 Bulk Paste", font=("Segoe UI", 8, "bold"), bg="#d97706", fg="white", activebackground="#b45309", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_bulk_import_dialog)
-        btn_bulk.pack(side=tk.LEFT, padx=2)
+        btn_bulk = tk.Button(r1, text="📋 Bulk Paste", font=font_spec(10, "bold"), bg="#d97706", fg="white", activebackground="#b45309", activeforeground="white", relief="flat", padx=10, pady=3, cursor="hand2", command=self.open_bulk_import_dialog)
+        btn_bulk.pack(side=tk.LEFT, padx=3)
 
-        btn_open_excel = tk.Button(r1, text="📊 Open Excel", font=("Segoe UI", 8, "bold"), bg="#16a34a", fg="white", activebackground="#15803d", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_excel_file)
-        btn_open_excel.pack(side=tk.LEFT, padx=2)
+        btn_open_excel = tk.Button(r1, text="📊 Open Excel", font=font_spec(10, "bold"), bg="#16a34a", fg="white", activebackground="#15803d", activeforeground="white", relief="flat", padx=10, pady=3, cursor="hand2", command=self.open_excel_file)
+        btn_open_excel.pack(side=tk.LEFT, padx=3)
 
         # Row 2: Management & Settings
         r2 = tk.Frame(right_box, bg="#1a365d")
@@ -6663,6 +6663,28 @@ class TodayWorkUpdateApp:
         if not is_dialog_open and not msg_obj.get("is_me", False):
             self.unread_lan_messages += 1
             self.root.after(0, self._update_chat_button_badge)
+
+            # Trigger in-app toast in main window
+            sender = msg_obj.get("user_name", "Colleague")
+            m_type = msg_obj.get("type", "chat")
+            if m_type == "file":
+                preview = f"Shared file: {msg_obj.get('file_name', 'Attachment')} ({msg_obj.get('file_size_str', '')})"
+                icon = "📁"
+            elif m_type == "work_update":
+                preview = f"Shared Work Log: {msg_obj.get('title', '')}"
+                icon = "📋"
+            else:
+                preview = msg_obj.get("text", "New message")
+                icon = "💬"
+
+            self.root.after(0, lambda: show_in_app_toast(
+                self.root,
+                f"{icon} {sender}",
+                preview,
+                icon=icon,
+                on_click=self.open_lan_chat,
+                duration_ms=5000
+            ))
 
     def _update_chat_button_badge(self):
         if hasattr(self, 'btn_chat'):
