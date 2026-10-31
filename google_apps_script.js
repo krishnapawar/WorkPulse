@@ -239,6 +239,134 @@ function doPost(e) {
       })).setMimeType(ContentService.MimeType.JSON);
     }
 
+    // --------------------------------------------------------------------------
+    // ACTION 5: Fetch Single Month / Sheet Rows
+    // --------------------------------------------------------------------------
+    if (data.action === "fetch_month" || data.action === "fetch_sheet") {
+      var fetchMonthName = data.sheet_name || "Work Logs";
+      var fetchTargetSheet = ss.getSheetByName(fetchMonthName);
+      if (!fetchTargetSheet) {
+        var allCandidateSheets = ss.getSheets();
+        for (var csIdx = 0; csIdx < allCandidateSheets.length; csIdx++) {
+          if (allCandidateSheets[csIdx].getName().trim().toLowerCase() === fetchMonthName.trim().toLowerCase()) {
+            fetchTargetSheet = allCandidateSheets[csIdx];
+            fetchMonthName = fetchTargetSheet.getName();
+            break;
+          }
+        }
+      }
+
+      if (!fetchTargetSheet) {
+        return ContentService.createTextOutput(JSON.stringify({
+          status: "error",
+          message: "Sheet tab '" + fetchMonthName + "' not found in Google Spreadsheet."
+        })).setMimeType(ContentService.MimeType.JSON);
+      }
+
+      var lastRow = fetchTargetSheet.getLastRow();
+      var lastCol = fetchTargetSheet.getLastColumn();
+      var fetchHeaders = defaultHeaders;
+      var fetchedRows = [];
+
+      if (lastRow >= 1 && lastCol >= 1) {
+        fetchHeaders = fetchTargetSheet.getRange(1, 1, 1, lastCol).getDisplayValues()[0];
+      }
+      if (lastRow >= 2 && lastCol >= 1) {
+        var rawMonthRows = fetchTargetSheet.getRange(2, 1, lastRow - 1, lastCol).getDisplayValues();
+        for (var rIdx = 0; rIdx < rawMonthRows.length; rIdx++) {
+          var rItem = rawMonthRows[rIdx];
+          var hasNonEmptyCell = false;
+          for (var cIdx = 0; cIdx < rItem.length; cIdx++) {
+            if (rItem[cIdx] !== null && rItem[cIdx].toString().trim() !== "") {
+              hasNonEmptyCell = true;
+              break;
+            }
+          }
+          if (hasNonEmptyCell) {
+            fetchedRows.push(rItem);
+          }
+        }
+      }
+
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        message: "Successfully fetched " + fetchedRows.length + " rows from tab '" + fetchMonthName + "'",
+        sheet_name: fetchMonthName,
+        sheetTitle: ss.getName(),
+        headers: fetchHeaders,
+        rows: fetchedRows,
+        rowCount: fetchedRows.length,
+        sheets: ss.getSheets().map(function(s) { return s.getName(); })
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // --------------------------------------------------------------------------
+    // ACTION 6: Fetch All Sheets Across Workbook
+    // --------------------------------------------------------------------------
+    if (data.action === "fetch_all") {
+      var allWbSheets = ss.getSheets();
+      var fetchedSheetsDict = {};
+      var totalFetchedRows = 0;
+      var validTabNames = [];
+
+      for (var wbIdx = 0; wbIdx < allWbSheets.length; wbIdx++) {
+        var sObj = allWbSheets[wbIdx];
+        var sTitle = sObj.getName();
+        var sLRow = sObj.getLastRow();
+        var sLCol = sObj.getLastColumn();
+
+        if (sLRow < 1 || sLCol < 1) continue;
+
+        var sHds = sObj.getRange(1, 1, 1, sLCol).getDisplayValues()[0];
+        var sDataRows = [];
+        if (sLRow >= 2) {
+          var rawSheetRows = sObj.getRange(2, 1, sLRow - 1, sLCol).getDisplayValues();
+          for (var srIdx = 0; srIdx < rawSheetRows.length; srIdx++) {
+            var srItem = rawSheetRows[srIdx];
+            var cellFound = false;
+            for (var scIdx = 0; scIdx < srItem.length; scIdx++) {
+              if (srItem[scIdx] !== null && srItem[scIdx].toString().trim() !== "") {
+                cellFound = true;
+                break;
+              }
+            }
+            if (cellFound) {
+              sDataRows.push(srItem);
+            }
+          }
+        }
+
+        fetchedSheetsDict[sTitle] = {
+          headers: sHds,
+          rows: sDataRows
+        };
+        totalFetchedRows += sDataRows.length;
+        validTabNames.push(sTitle);
+      }
+
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        message: "Successfully fetched " + validTabNames.length + " sheets (" + totalFetchedRows + " total records)",
+        sheetTitle: ss.getName(),
+        sheets: fetchedSheetsDict,
+        sheet_names: validTabNames,
+        totalSheets: validTabNames.length,
+        totalRows: totalFetchedRows
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
+    // --------------------------------------------------------------------------
+    // ACTION 7: List Available Sheets
+    // --------------------------------------------------------------------------
+    if (data.action === "list_sheets") {
+      var allTabNames = ss.getSheets().map(function(s) { return s.getName(); });
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "success",
+        sheetTitle: ss.getName(),
+        sheets: allTabNames
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+
     return ContentService.createTextOutput(JSON.stringify({
       status: "error",
       message: "Unknown action: " + data.action
@@ -256,6 +384,45 @@ function doPost(e) {
 
 function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
+  var defaultHeaders = [
+    "ID", "Date", "Project / Module", "Task Title", "Work Description",
+    "Hours Spent", "Status", "Remarks", "Login Time", "Logout Time",
+    "Lunch Break", "Tea Break", "Logged At"
+  ];
+  var action = (e && e.parameter && e.parameter.action) ? e.parameter.action : "ping";
+
+  if (action === "fetch_month" && e.parameter && e.parameter.sheet_name) {
+    var targetName = e.parameter.sheet_name;
+    var targetSheet = ss.getSheetByName(targetName);
+    if (!targetSheet) {
+      return ContentService.createTextOutput(JSON.stringify({
+        status: "error",
+        message: "Sheet tab '" + targetName + "' was not found."
+      })).setMimeType(ContentService.MimeType.JSON);
+    }
+    var lRow = targetSheet.getLastRow();
+    var lCol = targetSheet.getLastColumn();
+    var hds = (lRow >= 1 && lCol >= 1) ? targetSheet.getRange(1, 1, 1, lCol).getDisplayValues()[0] : defaultHeaders;
+    var rList = [];
+    if (lRow >= 2 && lCol >= 1) {
+      var rawValues = targetSheet.getRange(2, 1, lRow - 1, lCol).getDisplayValues();
+      for (var ri = 0; ri < rawValues.length; ri++) {
+        var rLine = rawValues[ri];
+        if (rLine.some(function(c) { return c !== null && c.toString().trim() !== ""; })) {
+          rList.push(rLine);
+        }
+      }
+    }
+    return ContentService.createTextOutput(JSON.stringify({
+      status: "success",
+      sheet_name: targetName,
+      sheetTitle: ss.getName(),
+      headers: hds,
+      rows: rList,
+      rowCount: rList.length
+    })).setMimeType(ContentService.MimeType.JSON);
+  }
+
   return ContentService.createTextOutput(JSON.stringify({
     status: "online",
     message: "WorkPulse Google Apps Script Web App is active!",

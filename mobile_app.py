@@ -45,7 +45,9 @@ try:
         save_work_update, load_settings, save_settings,
         calculate_net_working_hours, format_human_time,
         get_daily_timings, save_daily_timings,
-        format_date_only, FILE, sync_google_sheet_month
+        format_date_only, FILE, sync_google_sheet_month,
+        fetch_google_sheet_month, save_fetched_rows_to_excel,
+        fetch_and_load_month_data
     )
 except ImportError:
     pass
@@ -174,6 +176,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_sync.bind(on_release=self.sync_gsheet)
         row_extra.add_widget(btn_sync)
 
+        btn_fetch = Button(
+            text="📥 Fetch G-Sheet",
+            background_normal='',
+            background_color=get_color_from_hex("#4f46e5"),
+            color=(1, 1, 1, 1),
+            bold=True
+        )
+        btn_fetch.bind(on_release=self.fetch_gsheet)
+        row_extra.add_widget(btn_fetch)
+
         btn_clear = Button(
             text="🧹 Clear",
             background_normal='',
@@ -227,6 +239,38 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         threading.Thread(target=_do_sync, daemon=True).start()
 
+    def fetch_gsheet(self, *args):
+        import threading
+        if 'fetch_google_sheet_month' not in globals():
+            self.show_popup("Error", "Google Sheet fetch module not loaded.")
+            return
+
+        settings = load_settings() if 'load_settings' in globals() else {}
+        url = settings.get("gsheet_webapp_url", "").strip()
+        if not url:
+            self.show_popup("Setup Required", "Please configure your Google Sheet Web App URL in settings.json.")
+            return
+
+        try:
+            date_str = self.in_date.text.strip()
+            dt = datetime.datetime.strptime(date_str, "%Y-%m-%d")
+            month_name = dt.strftime("%B %Y")
+        except Exception:
+            month_name = datetime.datetime.now().strftime("%B %Y")
+
+        def _do_fetch():
+            ok, data, code = fetch_google_sheet_month(month_name)
+            if ok and isinstance(data, dict):
+                rows = data.get("rows", [])
+                if 'save_fetched_rows_to_excel' in globals():
+                    save_fetched_rows_to_excel(month_name, data.get("headers"), rows)
+                self.show_popup("Fetch Complete", f"Fetched {len(rows)} records from Google Sheet ('{month_name}') and synchronized with local system!")
+            else:
+                msg = data if isinstance(data, str) else (data.get("message", "Error") if isinstance(data, dict) else "Error")
+                self.show_popup("Fetch Notice", f"Google Sheet unavailable:\n{msg}\nUsing local system records.")
+
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
     def on_save(self, *args):
         date_v = self.in_date.text.strip()
         proj_v = self.in_proj.text.strip() or "General Work"
@@ -276,6 +320,21 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             except Exception:
                 pass
         self.show_popup("Copied", "📋 Standup update copied to clipboard!")
+
+    def on_start(self):
+        settings = load_settings() if 'load_settings' in globals() else {}
+        if settings.get("gsheet_fetch_priority", True) and settings.get("gsheet_webapp_url"):
+            month_name = datetime.datetime.now().strftime("%B %Y")
+            def _auto_fetch():
+                try:
+                    if 'fetch_google_sheet_month' in globals() and 'save_fetched_rows_to_excel' in globals():
+                        ok, data, code = fetch_google_sheet_month(month_name)
+                        if ok and isinstance(data, dict):
+                            rows = data.get("rows", [])
+                            save_fetched_rows_to_excel(month_name, data.get("headers"), rows)
+                except Exception:
+                    pass
+            threading.Thread(target=_auto_fetch, daemon=True).start()
 
     def show_popup(self, title, msg):
         content = BoxLayout(orientation='vertical', padding=12, spacing=10)

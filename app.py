@@ -12,6 +12,8 @@ import urllib.request
 import urllib.parse
 import webbrowser
 import threading
+import time
+import queue
 import openpyxl
 from openpyxl import Workbook, load_workbook
 from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
@@ -19,6 +21,12 @@ from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from collections import defaultdict
 from lan_chat import LANChatEngine, LANChatDialog, font_spec, show_desktop_notification, show_in_app_toast
+
+_MAIN_THREAD_DISPATCHER_QUEUE = queue.Queue()
+
+def run_on_ui_thread(callback):
+    """Safely dispatches a callback to be executed on the Tkinter main GUI thread (compatible with Python 3.14+ thread safety)."""
+    _MAIN_THREAD_DISPATCHER_QUEUE.put(callback)
 
 def open_file_externally(filepath):
     """Open a file with the default system application across Windows, macOS, and Linux."""
@@ -141,6 +149,7 @@ DEFAULT_SETTINGS = {
     "lan_chat_port": 45454,
     "gsheet_webapp_url": "",
     "gsheet_auto_sync": True,
+    "gsheet_fetch_priority": True,
     "gsheet_last_sync": ""
 }
 
@@ -188,6 +197,8 @@ def load_settings():
         merged["gsheet_webapp_url"] = ""
     if "gsheet_auto_sync" not in merged:
         merged["gsheet_auto_sync"] = True
+    if "gsheet_fetch_priority" not in merged:
+        merged["gsheet_fetch_priority"] = True
     return merged
 
 def save_settings(settings_data):
@@ -1256,17 +1267,31 @@ def load_month_records(sheet_name):
         return []
 
 def get_available_months():
-    """Get list of all month sheets in the Excel workbook."""
-    if not os.path.exists(FILE):
-        return [datetime.datetime.now().strftime("%B %Y")]
+    """Get list of all month sheets in the Excel workbook, merged with Google Sheet tabs if connected."""
+    local_sheets = []
+    if os.path.exists(FILE):
+        try:
+            wb = load_workbook(FILE, read_only=True)
+            local_sheets = [s for s in wb.sheetnames if s not in ("Records", "Sheet", "Sheet1")]
+        except Exception:
+            pass
+
+    # Check cached Google Sheet sheets if available
+    gsheet_sheets = []
     try:
-        wb = load_workbook(FILE, read_only=True)
-        sheets = [s for s in wb.sheetnames if s != "Records"]
-        if not sheets:
-            sheets = [datetime.datetime.now().strftime("%B %Y")]
-        return sheets
+        if _gsheet_conn_cache.get("connected") and _gsheet_conn_cache.get("sheets"):
+            gsheet_sheets = [s for s in _gsheet_conn_cache["sheets"] if s not in ("Records", "Sheet", "Sheet1")]
     except Exception:
-        return [datetime.datetime.now().strftime("%B %Y")]
+        pass
+
+    combined = []
+    for s in local_sheets + gsheet_sheets:
+        if s and s not in combined:
+            combined.append(s)
+
+    if not combined:
+        combined = [datetime.datetime.now().strftime("%B %Y")]
+    return combined
 
 def get_distinct_projects():
     """Retrieve distinct project names for autocomplete."""
@@ -1680,6 +1705,7 @@ function doPost(e) {
   try {
     var data = JSON.parse(e.postData.contents);
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var defaultHeaders = ["ID","Date","Project / Module","Task Title","Work Description","Hours Spent","Status","Remarks","Login Time","Logout Time","Lunch Break","Tea Break","Logged At"];
     if (data.action === "ping") {
       return ContentService.createTextOutput(JSON.stringify({
         status: "success",
@@ -1688,24 +1714,24 @@ function doPost(e) {
         sheets: ss.getSheets().map(function(s) { return s.getName(); })
       })).setMimeType(ContentService.MimeType.JSON);
     }
+    if (data.action === "fetch_month" || data.action === "fetch_sheet") {
+      var sName = data.sheet_name || "Work Logs";
+      var s = ss.getSheetByName(sName);
+      if (!s) return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Tab not found" })).setMimeType(ContentService.MimeType.JSON);
+      var lRow = s.getLastRow(), lCol = s.getLastColumn();
+      var hds = (lRow >= 1 && lCol >= 1) ? s.getRange(1, 1, 1, lCol).getDisplayValues()[0] : defaultHeaders;
+      var rows = (lRow >= 2 && lCol >= 1) ? s.getRange(2, 1, lRow - 1, lCol).getDisplayValues().filter(function(r){ return r.some(function(c){ return c !== ""; }); }) : [];
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", sheet_name: sName, sheetTitle: ss.getName(), headers: hds, rows: rows })).setMimeType(ContentService.MimeType.JSON);
+    }
     if (data.action === "sync_month" || data.action === "sync_sheet") {
       var sName = data.sheet_name || "Work Logs";
       var s = ss.getSheetByName(sName) || ss.insertSheet(sName);
-      var hd = data.headers || [];
+      var hd = data.headers || defaultHeaders;
       var rows = data.rows || [];
       s.clearContents();
-      if (hd.length) {
-        s.getRange(1, 1, 1, hd.length).setValues([hd]).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
-      }
-      if (rows.length) {
-        s.getRange(2, 1, rows.length, hd.length).setValues(rows);
-      }
-      return ContentService.createTextOutput(JSON.stringify({
-        status: "success",
-        message: "Synced " + rows.length + " rows to tab '" + sName + "'",
-        updatedRows: rows.length,
-        sheetTitle: ss.getName()
-      })).setMimeType(ContentService.MimeType.JSON);
+      if (hd.length) s.getRange(1, 1, 1, hd.length).setValues([hd]).setBackground("#1F4E79").setFontColor("#FFFFFF").setFontWeight("bold");
+      if (rows.length) s.getRange(2, 1, rows.length, hd.length).setValues(rows);
+      return ContentService.createTextOutput(JSON.stringify({ status: "success", message: "Synced " + rows.length + " rows to tab '" + sName + "'", updatedRows: rows.length, sheetTitle: ss.getName() })).setMimeType(ContentService.MimeType.JSON);
     }
     return ContentService.createTextOutput(JSON.stringify({ status: "error", message: "Unknown action" })).setMimeType(ContentService.MimeType.JSON);
   } catch (err) {
@@ -1716,7 +1742,7 @@ function doPost(e) {
 }
 function doGet(e) {
   var ss = SpreadsheetApp.getActiveSpreadsheet();
-  return ContentService.createTextOutput(JSON.stringify({ status: "online", sheetTitle: ss.getName() })).setMimeType(ContentService.MimeType.JSON);
+  return ContentService.createTextOutput(JSON.stringify({ status: "online", sheetTitle: ss.getName(), sheets: ss.getSheets().map(function(s) { return s.getName(); }) })).setMimeType(ContentService.MimeType.JSON);
 }"""
 
 def get_raw_sheet_rows(sheet_name):
@@ -1885,6 +1911,241 @@ def sync_google_sheet_all(webapp_url=None, timeout=50):
         save_settings(settings)
     return ok, data, code
 
+def fetch_google_sheet_month(month_name=None, webapp_url=None, timeout=20):
+    """Fetches all rows of a specific month tab directly from Google Sheet."""
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    if not month_name:
+        month_name = datetime.datetime.now().strftime("%B %Y")
+    payload = {
+        "action": "fetch_month",
+        "sheet_name": month_name,
+        "client": "WorkPulse",
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    return send_google_sheet_payload(url, payload, timeout=timeout)
+
+def fetch_google_sheet_all(webapp_url=None, timeout=35):
+    """Fetches all sheets and records from Google Sheet."""
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    payload = {
+        "action": "fetch_all",
+        "client": "WorkPulse",
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    return send_google_sheet_payload(url, payload, timeout=timeout)
+
+def fetch_google_sheet_sheets_list(webapp_url=None, timeout=10):
+    """Fetches available sheet tab names from Google Sheet."""
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    payload = {
+        "action": "list_sheets",
+        "client": "WorkPulse",
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+    return send_google_sheet_payload(url, payload, timeout=timeout)
+
+def is_google_sheet_configured(settings=None):
+    """Checks whether a valid Google Sheet Web App URL is present in settings."""
+    if settings is None:
+        settings = load_settings()
+    url = (settings.get("gsheet_webapp_url") or "").strip()
+    return bool(url and (url.startswith("http://") or url.startswith("https://")))
+
+_gsheet_conn_cache = {
+    "connected": None,
+    "last_check": 0,
+    "title": "",
+    "sheets": []
+}
+
+def check_google_sheet_connection(force=False, timeout=6):
+    """
+    Checks if Google Sheet is reachable. Caches result for 60 seconds unless force=True.
+    Returns (connected: bool, sheet_title: str, available_sheets: list).
+    """
+    global _gsheet_conn_cache
+    now = time.time()
+    if not force and _gsheet_conn_cache["connected"] is not None and (now - _gsheet_conn_cache["last_check"] < 60):
+        return _gsheet_conn_cache["connected"], _gsheet_conn_cache["title"], _gsheet_conn_cache["sheets"]
+
+    settings = load_settings()
+    url = (settings.get("gsheet_webapp_url") or "").strip()
+    if not is_google_sheet_configured(settings):
+        _gsheet_conn_cache = {"connected": False, "last_check": now, "title": "", "sheets": []}
+        return False, "", []
+
+    ok, data, code = ping_google_sheet(webapp_url=url, timeout=timeout)
+    if ok and isinstance(data, dict):
+        title = data.get("sheetTitle", "Google Spreadsheet")
+        sheets = data.get("sheets", [])
+        _gsheet_conn_cache = {
+            "connected": True,
+            "last_check": now,
+            "title": title,
+            "sheets": sheets
+        }
+        return True, title, sheets
+    else:
+        _gsheet_conn_cache = {"connected": False, "last_check": now, "title": "", "sheets": []}
+        return False, "", []
+
+def save_fetched_rows_to_excel(sheet_name, headers, rows):
+    """
+    Saves/syncs rows fetched from Google Sheets into the local Excel file (data.xlsx).
+    Replaces rows in that month tab, applies Excel styling, and updates local file.
+    """
+    if not sheet_name:
+        return False
+    try:
+        if not os.path.exists(FILE):
+            wb = Workbook()
+            ws = wb.active
+            ws.title = sheet_name
+            ws.append(headers or HEADERS)
+            style_header_row(ws)
+        else:
+            wb = load_workbook(FILE)
+            if sheet_name in wb.sheetnames:
+                ws = wb[sheet_name]
+                if ws.max_row >= 2:
+                    ws.delete_rows(2, ws.max_row - 1)
+            else:
+                ws = wb.create_sheet(title=sheet_name)
+                ws.append(headers or HEADERS)
+                style_header_row(ws)
+
+        for row in (rows or []):
+            if not row or not any(row):
+                continue
+            r_list = list(row)
+            while len(r_list) < len(HEADERS):
+                r_list.append("")
+            ws.append(r_list)
+
+        restyle_all_rows_in_sheet(ws)
+        adjust_column_widths(ws)
+
+        settings = load_settings()
+        if settings.get("auto_arrange_by_date", True):
+            asc = (settings.get("date_sort_order", "asc") == "asc")
+            sort_sheet_records_by_date(ws, ascending=asc)
+
+        wb.save(FILE)
+        wb.close()
+        return True
+    except Exception as e:
+        print(f"Error saving fetched rows to Excel for {sheet_name}: {e}")
+        return False
+
+def save_all_fetched_sheets_to_excel(sheets_dict):
+    """
+    Saves all sheets fetched from Google Sheet into local data.xlsx.
+    """
+    if not sheets_dict:
+        return False
+    try:
+        if not os.path.exists(FILE):
+            wb = Workbook()
+            first = True
+        else:
+            wb = load_workbook(FILE)
+            first = False
+
+        for s_name, s_info in sheets_dict.items():
+            if s_name == "Sheet1" and len(sheets_dict) > 1:
+                continue
+
+            if isinstance(s_info, dict):
+                headers = s_info.get("headers") or HEADERS
+                rows = s_info.get("rows") or []
+            elif isinstance(s_info, list):
+                headers = HEADERS
+                rows = s_info
+            else:
+                continue
+
+            if s_name in wb.sheetnames:
+                ws = wb[s_name]
+                if ws.max_row >= 2:
+                    ws.delete_rows(2, ws.max_row - 1)
+            else:
+                if first:
+                    ws = wb.active
+                    ws.title = s_name
+                    ws.append(headers)
+                    first = False
+                else:
+                    ws = wb.create_sheet(title=s_name)
+                    ws.append(headers)
+                style_header_row(ws)
+
+            for r in rows:
+                if not r or not any(r):
+                    continue
+                r_list = list(r)
+                while len(r_list) < len(HEADERS):
+                    r_list.append("")
+                ws.append(r_list)
+
+            restyle_all_rows_in_sheet(ws)
+            adjust_column_widths(ws)
+
+        if "Sheet" in wb.sheetnames and len(wb.sheetnames) > 1:
+            try:
+                wb.remove(wb["Sheet"])
+            except Exception:
+                pass
+
+        wb.save(FILE)
+        wb.close()
+        return True
+    except Exception as e:
+        print(f"Error saving all fetched sheets to Excel: {e}")
+        return False
+
+def fetch_and_load_month_data(month_name, prefer_gsheet=True, timeout=12):
+    """
+    Intelligent Data Loader:
+    - If connected to Google Sheet (and prefer_gsheet is True):
+      Fetches records directly from Google Sheet, syncs them to local Excel (data.xlsx), and returns them.
+    - If Google Sheet is not configured, unreachable, or returns an error:
+      Seamlessly falls back to local system (data.xlsx).
+    Returns (success: bool, source: "gsheet"|"local", records: list, message: str)
+    """
+    settings = load_settings()
+    if prefer_gsheet and is_google_sheet_configured(settings) and settings.get("gsheet_fetch_priority", True):
+        try:
+            ok, data, code = fetch_google_sheet_month(month_name, timeout=timeout)
+            if ok and isinstance(data, dict) and "rows" in data:
+                rows = data.get("rows", [])
+                headers = data.get("headers", HEADERS)
+                title = data.get("sheetTitle", "Google Sheet")
+                if "sheets" in data and isinstance(data["sheets"], list):
+                    _gsheet_conn_cache["sheets"] = data["sheets"]
+                    _gsheet_conn_cache["connected"] = True
+                    _gsheet_conn_cache["title"] = title
+                    _gsheet_conn_cache["last_check"] = time.time()
+                # Cache to local Excel file
+                save_fetched_rows_to_excel(month_name, headers, rows)
+                # Load formatted records (sorted and typed)
+                loaded_records = load_month_records(month_name)
+                return True, "gsheet", loaded_records, f"Fetched {len(loaded_records)} rows from Google Sheet ('{title}')"
+            else:
+                err_msg = data.get("message") if isinstance(data, dict) else str(data)
+                # Fallback to local
+                local_recs = load_month_records(month_name)
+                return True, "local", local_recs, f"Google Sheet unavailable ({str(err_msg)[:40]}). Loaded from local system."
+        except Exception as e:
+            local_recs = load_month_records(month_name)
+            return True, "local", local_recs, f"Connection failed ({str(e)[:40]}). Loaded from local system."
+
+    # Direct local load
+    local_recs = load_month_records(month_name)
+    return True, "local", local_recs, f"Loaded from local Excel ({FILE})"
+
 # ==============================================================================
 # ---------- Google Sheets Auto-Sync Engine & Background Worker ----------
 # ==============================================================================
@@ -1967,8 +2228,7 @@ class GoogleSheetSyncWorker:
     def _notify_ui(cls, msg, color=None):
         if cls._app_ref:
             try:
-                if hasattr(cls._app_ref, 'root') and cls._app_ref.root:
-                    cls._app_ref.root.after(0, lambda: cls._safe_status_update(msg, color))
+                run_on_ui_thread(lambda: cls._safe_status_update(msg, color))
             except Exception:
                 pass
 
@@ -3018,6 +3278,10 @@ class SettingsDialog(tk.Toplevel):
         chk_auto = tk.Checkbutton(auto_box, text="⚡ Auto-Sync on Save/Edit/Delete (Automatically updates Google Sheet tab in background)", variable=self.var_gsheet_auto_sync, font=("Segoe UI", 9, "bold"), fg="#1e293b", bg="#ffffff")
         chk_auto.pack(anchor="w", pady=3)
 
+        self.var_gsheet_fetch_priority = tk.BooleanVar(value=bool(self.settings.get("gsheet_fetch_priority", True)))
+        chk_fetch = tk.Checkbutton(auto_box, text="⚡ Smart Hybrid Fetch: Fetch from Google Sheet when connected, fallback to local system", variable=self.var_gsheet_fetch_priority, font=("Segoe UI", 9, "bold"), fg="#047857", bg="#ffffff")
+        chk_fetch.pack(anchor="w", pady=3)
+
         guide_box = tk.LabelFrame(form_frame, text="  3. Quick Setup Guide (4 Steps - 30 seconds)  ", font=("Segoe UI", 9, "bold"), fg="#334155", bg="#f8fafc", padx=10, pady=6, bd=1, relief="solid")
         guide_box.pack(fill=tk.BOTH, expand=True)
 
@@ -3075,7 +3339,8 @@ class SettingsDialog(tk.Toplevel):
             "data_api_sync_on_create": self.var_api_sync_on_create.get() if hasattr(self, 'var_api_sync_on_create') else True,
             "data_api_sync_on_delete": self.var_api_sync_on_delete.get() if hasattr(self, 'var_api_sync_on_delete') else True,
             "gsheet_webapp_url": self.entry_gsheet_url.get().strip() if hasattr(self, 'entry_gsheet_url') else self.settings.get("gsheet_webapp_url", ""),
-            "gsheet_auto_sync": self.var_gsheet_auto_sync.get() if hasattr(self, 'var_gsheet_auto_sync') else self.settings.get("gsheet_auto_sync", False)
+            "gsheet_auto_sync": self.var_gsheet_auto_sync.get() if hasattr(self, 'var_gsheet_auto_sync') else self.settings.get("gsheet_auto_sync", False),
+            "gsheet_fetch_priority": self.var_gsheet_fetch_priority.get() if hasattr(self, 'var_gsheet_fetch_priority') else self.settings.get("gsheet_fetch_priority", True)
         })
         save_settings(self.settings)
         if hasattr(self.parent, 'settings') and isinstance(self.parent.settings, dict):
@@ -3302,7 +3567,7 @@ class SyncApiDialog(tk.Toplevel):
 
         def _do_sync():
             ok, resp_msg, code = send_data_api_webhook(payload, api_url=url, auth_token=token, timeout=40)
-            self.after(0, lambda: self._on_sync_finished(ok, resp_msg, code, len(records), url))
+            run_on_ui_thread(lambda: self._on_sync_finished(ok, resp_msg, code, len(records), url))
 
         threading.Thread(target=_do_sync, daemon=True).start()
 
@@ -3464,14 +3729,65 @@ class GoogleSheetSyncDialog(tk.Toplevel):
         )
         chk_auto.pack(anchor="w", pady=(8, 2))
 
-        # 3. Live Activity & Response Log Card
-        log_card = tk.LabelFrame(main_f, text="  3. Live Activity & Server Response Log  ", font=("Segoe UI", 9, "bold"), fg="#0f9d58", bg="#ffffff", padx=10, pady=6, bd=1, relief="solid")
+        # 3. Pull / Fetch Data Card
+        fetch_card = tk.LabelFrame(main_f, text="  3. Pull / Fetch Data (Google Sheet -> Local System)  ", font=("Segoe UI", 9, "bold"), fg="#0284c7", bg="#ffffff", padx=12, pady=8, bd=1, relief="solid")
+        fetch_card.pack(fill=tk.X, pady=(0, 8))
+
+        fetch_act_row = tk.Frame(fetch_card, bg="#ffffff")
+        fetch_act_row.pack(fill=tk.X, pady=4)
+
+        self.btn_fetch_month = tk.Button(
+            fetch_act_row,
+            text=f"📥 Fetch Current Month ('{curr_month}')",
+            font=("Segoe UI", 9, "bold"),
+            bg="#0284c7",
+            fg="white",
+            activebackground="#0369a1",
+            activeforeground="white",
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            command=self.fetch_current_month
+        )
+        self.btn_fetch_month.pack(side=tk.LEFT, padx=(0, 10))
+
+        self.btn_fetch_all = tk.Button(
+            fetch_act_row,
+            text="🌐 Fetch All Months from Google Sheet",
+            font=("Segoe UI", 9, "bold"),
+            bg="#4338ca",
+            fg="white",
+            activebackground="#3730a3",
+            activeforeground="white",
+            relief="flat",
+            padx=12,
+            pady=6,
+            cursor="hand2",
+            command=self.fetch_all_months
+        )
+        self.btn_fetch_all.pack(side=tk.LEFT)
+
+        self.var_fetch_priority = tk.BooleanVar(value=bool(self.settings.get("gsheet_fetch_priority", True)))
+        chk_fetch_prio = tk.Checkbutton(
+            fetch_card,
+            text="⚡ Smart Hybrid Fetch: If connected to Google Sheet, fetch from Google Sheet; otherwise use local system",
+            variable=self.var_fetch_priority,
+            font=("Segoe UI", 9, "bold"),
+            fg="#0369a1",
+            bg="#ffffff",
+            command=self.toggle_fetch_priority
+        )
+        chk_fetch_prio.pack(anchor="w", pady=(8, 2))
+
+        # 4. Live Activity & Response Log Card
+        log_card = tk.LabelFrame(main_f, text="  4. Live Activity & Server Response Log  ", font=("Segoe UI", 9, "bold"), fg="#0f9d58", bg="#ffffff", padx=10, pady=6, bd=1, relief="solid")
         log_card.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
 
-        self.lbl_progress = tk.Label(log_card, text="Ready. Click 'Sync Current Month' or 'Sync All Months' to begin.", font=("Segoe UI", 9), bg="#ffffff", fg="#475569")
+        self.lbl_progress = tk.Label(log_card, text="Ready. Choose an action above to push or fetch data.", font=("Segoe UI", 9), bg="#ffffff", fg="#475569")
         self.lbl_progress.pack(anchor="w", pady=(0, 4))
 
-        self.text_log = tk.Text(log_card, font=("Consolas", 8), height=8, bg="#f8fafc", fg="#334155", relief="solid", bd=1, wrap=tk.NONE)
+        self.text_log = tk.Text(log_card, font=("Consolas", 8), height=7, bg="#f8fafc", fg="#334155", relief="solid", bd=1, wrap=tk.NONE)
         self.text_log.pack(fill=tk.BOTH, expand=True)
         self.log_message(f"WorkPulse Google Sheet Sync Initialized. Local sheets: {len(avail_months)} ({', '.join(avail_months[:3])}...)")
 
@@ -3584,7 +3900,7 @@ class GoogleSheetSyncDialog(tk.Toplevel):
 
         def _do_ping():
             ok, data, code = ping_google_sheet(webapp_url=url)
-            self.after(0, lambda: self._on_ping_finished(ok, data, code))
+            run_on_ui_thread(lambda: self._on_ping_finished(ok, data, code))
 
         threading.Thread(target=_do_ping, daemon=True).start()
 
@@ -3619,7 +3935,7 @@ class GoogleSheetSyncDialog(tk.Toplevel):
 
         def _do_sync():
             ok, data, code = sync_google_sheet_month(month_name=month, webapp_url=url)
-            self.after(0, lambda: self._on_sync_month_finished(ok, data, code, month))
+            run_on_ui_thread(lambda: self._on_sync_month_finished(ok, data, code, month))
 
         threading.Thread(target=_do_sync, daemon=True).start()
 
@@ -3666,7 +3982,7 @@ class GoogleSheetSyncDialog(tk.Toplevel):
 
         def _do_sync_all():
             ok, data, code = sync_google_sheet_all(webapp_url=url)
-            self.after(0, lambda: self._on_sync_all_finished(ok, data, code, len(months), len(all_recs)))
+            run_on_ui_thread(lambda: self._on_sync_all_finished(ok, data, code, len(months), len(all_recs)))
 
         threading.Thread(target=_do_sync_all, daemon=True).start()
 
@@ -3687,6 +4003,125 @@ class GoogleSheetSyncDialog(tk.Toplevel):
             self.log_message(f"FAILED: {msg} [HTTP {code}]")
             self.lbl_progress.config(text=f"❌ Bulk sync failed: {str(msg)[:40]}", fg="#dc2626")
             messagebox.showerror("Sync Failed", f"❌ Failed to sync all months to Google Sheet:\n\n{msg}")
+
+    def fetch_current_month(self):
+        url = self.entry_url.get().strip()
+        if not url:
+            messagebox.showwarning("Empty URL", "Please enter your Google Sheet Web App URL first.")
+            return
+
+        month = self.target_month_name
+        self.is_syncing = True
+        if hasattr(self, 'btn_fetch_month'):
+            self.btn_fetch_month.config(state=tk.DISABLED, text="⏳ Fetching Month...")
+        if hasattr(self, 'btn_fetch_all'):
+            self.btn_fetch_all.config(state=tk.DISABLED)
+        self.btn_sync_month.config(state=tk.DISABLED)
+        self.btn_sync_all.config(state=tk.DISABLED)
+        self.lbl_progress.config(text=f"Pulling '{month}' from Google Sheet...", fg="#0284c7")
+        self.log_message(f"Starting fetch for month tab: '{month}' from Google Sheet...")
+
+        def _do_fetch():
+            ok, data, code = fetch_google_sheet_month(month_name=month, webapp_url=url, timeout=25)
+            run_on_ui_thread(lambda: self._on_fetch_month_finished(ok, data, code, month))
+
+        threading.Thread(target=_do_fetch, daemon=True).start()
+
+    def _on_fetch_month_finished(self, ok, data, code, month):
+        self.is_syncing = False
+        if hasattr(self, 'btn_fetch_month'):
+            self.btn_fetch_month.config(state=tk.NORMAL, text=f"📥 Fetch Current Month ('{month}')")
+        if hasattr(self, 'btn_fetch_all'):
+            self.btn_fetch_all.config(state=tk.NORMAL)
+        self.btn_sync_month.config(state=tk.NORMAL)
+        self.btn_sync_all.config(state=tk.NORMAL)
+
+        if ok and isinstance(data, dict) and "rows" in data:
+            rows = data.get("rows", [])
+            headers = data.get("headers", HEADERS)
+            title = data.get("sheetTitle", "Google Sheet")
+            save_fetched_rows_to_excel(month, headers, rows)
+            self.log_message(f"SUCCESS: Fetched {len(rows)} rows from tab '{month}' in '{title}' [HTTP {code}]. Saved to local Excel.")
+            self.lbl_progress.config(text=f"✅ Fetched {len(rows)} rows from '{month}' tab successfully!", fg="#16a34a")
+            self.lbl_conn_status.config(text=f"Last fetched: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", fg="#15803d")
+            if self.app_ref and hasattr(self.app_ref, 'refresh_table'):
+                self.app_ref.refresh_table()
+            messagebox.showinfo("Fetch Complete", f"✅ Successfully fetched month '{month}' from Google Sheet!\n\n• Google Sheet: {title}\n• Tab: {month}\n• Rows Fetched: {len(rows)}\n\nLocal Excel file (data.xlsx) has been updated!")
+        else:
+            msg = data.get("message") if isinstance(data, dict) else str(data)
+            hint = ""
+            if "Unknown action" in str(msg):
+                hint = "\n\n⚠️ Your Google Apps Script in Google Sheets needs to be updated with the latest code to support fetching!\nClick '📋 Copy Google Apps Script Code' and paste it in Extensions > Apps Script."
+            self.log_message(f"FAILED: {msg} [HTTP {code}]")
+            self.lbl_progress.config(text=f"❌ Fetch failed: {str(msg)[:40]}", fg="#dc2626")
+            messagebox.showerror("Fetch Failed", f"❌ Failed to fetch month '{month}' from Google Sheet:\n\n{msg}{hint}\n\nLocal system records remain intact.")
+
+    def fetch_all_months(self):
+        url = self.entry_url.get().strip()
+        if not url:
+            messagebox.showwarning("Empty URL", "Please enter your Google Sheet Web App URL first.")
+            return
+
+        if not messagebox.askyesno("Fetch All Months", "Fetch all month tabs and records from Google Sheet and update local Excel workbook?"):
+            return
+
+        self.is_syncing = True
+        if hasattr(self, 'btn_fetch_all'):
+            self.btn_fetch_all.config(state=tk.DISABLED, text="⏳ Fetching All Sheets...")
+        if hasattr(self, 'btn_fetch_month'):
+            self.btn_fetch_month.config(state=tk.DISABLED)
+        self.btn_sync_month.config(state=tk.DISABLED)
+        self.btn_sync_all.config(state=tk.DISABLED)
+        self.lbl_progress.config(text="Pulling all sheets from Google Sheet...", fg="#0284c7")
+        self.log_message("Starting bulk fetch of all sheets from Google Sheet...")
+
+        def _do_fetch_all():
+            ok, data, code = fetch_google_sheet_all(webapp_url=url, timeout=35)
+            run_on_ui_thread(lambda: self._on_fetch_all_finished(ok, data, code))
+
+        threading.Thread(target=_do_fetch_all, daemon=True).start()
+
+    def _on_fetch_all_finished(self, ok, data, code):
+        self.is_syncing = False
+        month = self.target_month_name
+        if hasattr(self, 'btn_fetch_month'):
+            self.btn_fetch_month.config(state=tk.NORMAL, text=f"📥 Fetch Current Month ('{month}')")
+        if hasattr(self, 'btn_fetch_all'):
+            self.btn_fetch_all.config(state=tk.NORMAL, text="🌐 Fetch All Months from Google Sheet")
+        self.btn_sync_month.config(state=tk.NORMAL)
+        self.btn_sync_all.config(state=tk.NORMAL)
+
+        if ok and isinstance(data, dict) and "sheets" in data:
+            sheets = data.get("sheets", {})
+            title = data.get("sheetTitle", "Google Sheet")
+            total_rows = data.get("totalRows", 0)
+            save_all_fetched_sheets_to_excel(sheets)
+            self.log_message(f"SUCCESS: Fetched {len(sheets)} sheets ({total_rows} records) from '{title}' [HTTP {code}]. Saved to local Excel.")
+            self.lbl_progress.config(text=f"✅ Fetched {len(sheets)} sheets ({total_rows} records) successfully!", fg="#16a34a")
+            self.lbl_conn_status.config(text=f"Last fetched: {datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", fg="#15803d")
+            if self.app_ref:
+                if hasattr(self.app_ref, 'refresh_month_dropdown'):
+                    self.app_ref.refresh_month_dropdown()
+                if hasattr(self.app_ref, 'refresh_table'):
+                    self.app_ref.refresh_table()
+            messagebox.showinfo("Bulk Fetch Complete", f"✅ All sheets fetched from Google Sheet successfully!\n\n• Google Sheet: {title}\n• Sheets: {len(sheets)}\n• Total Records: {total_rows}\n\nLocal Excel file (data.xlsx) has been updated!")
+        else:
+            msg = data.get("message") if isinstance(data, dict) else str(data)
+            hint = ""
+            if "Unknown action" in str(msg):
+                hint = "\n\n⚠️ Your Google Apps Script in Google Sheets needs to be updated with the latest code to support fetching!\nClick '📋 Copy Google Apps Script Code' and paste it in Extensions > Apps Script."
+            self.log_message(f"FAILED: {msg} [HTTP {code}]")
+            self.lbl_progress.config(text=f"❌ Bulk fetch failed: {str(msg)[:40]}", fg="#dc2626")
+            messagebox.showerror("Fetch Failed", f"❌ Failed to fetch sheets from Google Sheet:\n\n{msg}{hint}\n\nLocal system records remain intact.")
+
+    def toggle_fetch_priority(self):
+        val = self.var_fetch_priority.get()
+        self.settings["gsheet_fetch_priority"] = val
+        save_settings(self.settings)
+        if hasattr(self.parent, 'settings') and isinstance(self.parent.settings, dict):
+            self.parent.settings["gsheet_fetch_priority"] = val
+        status_str = "ENABLED (fetches from Google Sheet when connected)" if val else "DISABLED (local system primary)"
+        self.log_message(f"Google Sheet Fetch Priority is now {status_str}.")
 
 # ---------- Dedicated Weekend & Holiday Settings Modal Dialog ----------
 class WeekendHolidayDialog(tk.Toplevel):
@@ -6005,8 +6440,32 @@ class TodayWorkUpdateApp:
         self.refresh_month_dropdown()
         self.refresh_table()
 
+        # Start thread-safe UI dispatcher (Python 3.14+ compatible)
+        self._process_ui_dispatch_queue()
+
         # Keyboard Shortcuts
         self.root.bind("<Control-comma>", lambda e: self.open_settings())
+
+        # Check Google Sheet connection and auto-fetch in background if configured
+        if is_google_sheet_configured(self.settings):
+            self.root.after(400, self.auto_check_and_fetch_gsheet_on_startup)
+
+    def _process_ui_dispatch_queue(self):
+        """Processes callbacks submitted from background threads safely on the main thread."""
+        try:
+            while not _MAIN_THREAD_DISPATCHER_QUEUE.empty():
+                try:
+                    cb = _MAIN_THREAD_DISPATCHER_QUEUE.get_nowait()
+                    cb()
+                except Exception as e:
+                    print(f"Error in UI dispatch callback: {e}")
+        except Exception:
+            pass
+        finally:
+            try:
+                self.root.after(40, self._process_ui_dispatch_queue)
+            except Exception:
+                pass
 
     def setup_styles(self):
         style = ttk.Style()
@@ -6502,6 +6961,9 @@ class TodayWorkUpdateApp:
         btn_stat_settings = tk.Button(f_status, text="⚙️ Settings (Ctrl+,)", font=("Segoe UI", 8), bg="#edf2f7", fg="#334155", activebackground="#e2e8f0", relief="flat", padx=8, pady=1, cursor="hand2", command=self.open_settings)
         btn_stat_settings.pack(side=tk.RIGHT, padx=6)
 
+        self.lbl_data_source = tk.Label(f_status, text="💻 Local System (data.xlsx)", font=("Segoe UI", 8, "bold"), bg="#edf2f7", fg="#475569", padx=8, pady=1)
+        self.lbl_data_source.pack(side=tk.RIGHT, padx=4)
+
     # ---------- Shift & Break Form Helpers ----------
     def set_entry_val(self, entry_widget, val):
         entry_widget.delete(0, tk.END)
@@ -6662,7 +7124,7 @@ class TodayWorkUpdateApp:
         is_dialog_open = bool(self.chat_dialog and hasattr(self.chat_dialog, "dialog") and self.chat_dialog.dialog.winfo_exists())
         if not is_dialog_open and not msg_obj.get("is_me", False):
             self.unread_lan_messages += 1
-            self.root.after(0, self._update_chat_button_badge)
+            run_on_ui_thread(self._update_chat_button_badge)
 
             # Trigger in-app toast in main window
             sender = msg_obj.get("user_name", "Colleague")
@@ -6677,7 +7139,7 @@ class TodayWorkUpdateApp:
                 preview = msg_obj.get("text", "New message")
                 icon = "💬"
 
-            self.root.after(0, lambda: show_in_app_toast(
+            run_on_ui_thread(lambda: show_in_app_toast(
                 self.root,
                 f"{icon} {sender}",
                 preview,
@@ -6702,7 +7164,7 @@ class TodayWorkUpdateApp:
 
     def _handle_lan_peers_change(self, peer_list):
         """Updates main window LAN presence indicator."""
-        self.root.after(0, lambda: self._update_lan_status_label(peer_list))
+        run_on_ui_thread(lambda: self._update_lan_status_label(peer_list))
 
     def _update_lan_status_label(self, peer_list):
         if hasattr(self, 'lbl_stat_lan'):
@@ -7047,11 +7509,11 @@ class TodayWorkUpdateApp:
                 def _trigger_api_webhook(payload_to_send, act_type):
                     ok, resp_str, status_code = send_data_api_webhook(payload_to_send)
                     if ok:
-                        self.root.after(0, lambda: self.status.config(
+                        run_on_ui_thread(lambda: self.status.config(
                             text=f"✅ {act_type} & Webhook delivered to API ({status_code}) at {datetime.datetime.now().strftime('%H:%M:%S')}"
                         ))
                     else:
-                        self.root.after(0, lambda: self.status.config(
+                        run_on_ui_thread(lambda: self.status.config(
                             text=f"⚠️ {act_type} locally, but Webhook failed: {resp_str[:60]}"
                         ))
 
@@ -7197,15 +7659,109 @@ class TodayWorkUpdateApp:
             elif months:
                 self.current_selected_month.set(months[0])
 
+    def auto_check_and_fetch_gsheet_on_startup(self):
+        """Checks Google Sheet connection on startup; if online, fetches latest month data in background."""
+        curr_m = ""
+        try:
+            curr_m = self.current_selected_month.get()
+        except Exception:
+            pass
+        if not curr_m:
+            curr_m = datetime.datetime.now().strftime("%B %Y")
+
+        if hasattr(self, 'status'):
+            self.status.config(text=f"🔄 Connecting to Google Sheet & auto-fetching '{curr_m}'...", fg="#0284c7")
+        if hasattr(self, 'lbl_data_source'):
+            self.lbl_data_source.config(text="🔄 Syncing Cloud...", fg="#0284c7")
+
+        def _bg_check(target_month):
+            ok, source, recs, msg = fetch_and_load_month_data(target_month, prefer_gsheet=True, timeout=12)
+            run_on_ui_thread(lambda: self._on_startup_fetch_done(target_month, source, recs, msg))
+
+        threading.Thread(target=_bg_check, args=(curr_m,), daemon=True).start()
+
+    def _on_startup_fetch_done(self, month_name, source, records, msg):
+        if source == "gsheet":
+            self.refresh_month_dropdown(select_month=month_name)
+            self.refresh_table()
+            self.combo_project['values'] = get_distinct_projects()
+            self.status.config(text=f"🟢 Connected to Google Sheet | {msg}", fg="#16a34a")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="🟢 Google Sheet (Online)", fg="#15803d")
+        else:
+            self.refresh_table()
+            self.status.config(text=f"💻 Loaded from local system ({FILE})", fg="#475569")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="💻 Local System (data.xlsx)", fg="#475569")
+
     def on_month_selected(self):
+        selected_month = self.current_selected_month.get()
+        settings = load_settings()
+        if is_google_sheet_configured(settings) and settings.get("gsheet_fetch_priority", True):
+            self.refresh_table()
+            self.status.config(text=f"🔄 Switched to '{selected_month}' | Checking Google Sheet...", fg="#0284c7")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="🔄 Syncing Google Sheet...", fg="#0284c7")
+
+            def _bg_month_fetch(target_month):
+                ok, source, recs, msg = fetch_and_load_month_data(target_month, prefer_gsheet=True, timeout=12)
+                run_on_ui_thread(lambda: self._on_month_selected_done(target_month, source, msg))
+
+            threading.Thread(target=_bg_month_fetch, args=(selected_month,), daemon=True).start()
+        else:
+            self.refresh_table()
+            self.status.config(text=f"Switched to Month Tab: {selected_month} (Local)")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="💻 Local System (data.xlsx)", fg="#475569")
+
+    def _on_month_selected_done(self, month_name, source, msg):
         self.refresh_table()
-        self.status.config(text=f"Switched to Month Tab: {self.current_selected_month.get()}")
+        if source == "gsheet":
+            self.status.config(text=f"✅ {month_name}: {msg}", fg="#16a34a")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="🟢 Google Sheet (Online)", fg="#15803d")
+        else:
+            self.status.config(text=f"Switched to Month Tab: {month_name}", fg="#475569")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="💻 Local System (data.xlsx)", fg="#475569")
 
     def refresh_all(self):
-        self.refresh_month_dropdown(select_month=self.current_selected_month.get())
-        self.refresh_table()
+        """
+        Refreshes all records.
+        If connected to Google Sheet -> fetches from Google Sheet and syncs to local system.
+        Otherwise -> loads from local system (data.xlsx).
+        """
+        curr_m = self.current_selected_month.get() or datetime.datetime.now().strftime("%B %Y")
+        self.refresh_month_dropdown(select_month=curr_m)
         self.combo_project['values'] = get_distinct_projects()
-        self.status.config(text="Data refreshed from Excel.")
+
+        settings = load_settings()
+        if is_google_sheet_configured(settings) and settings.get("gsheet_fetch_priority", True):
+            self.status.config(text=f"🔄 Fetching '{curr_m}' from Google Sheet...", fg="#0284c7")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="🔄 Syncing Google Sheet...", fg="#0284c7")
+
+            def _worker(target_month):
+                ok, source, recs, msg = fetch_and_load_month_data(target_month, prefer_gsheet=True, timeout=15)
+                run_on_ui_thread(lambda: self._on_fetch_refresh_done(target_month, source, recs, msg))
+
+            threading.Thread(target=_worker, args=(curr_m,), daemon=True).start()
+        else:
+            self.refresh_table()
+            self.status.config(text=f"💻 Data refreshed from local Excel ({FILE}).", fg="#475569")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="💻 Local System (data.xlsx)", fg="#475569")
+
+    def _on_fetch_refresh_done(self, month_name, source, records, msg):
+        self.refresh_table()
+        if source == "gsheet":
+            self.status.config(text=f"✅ {msg}", fg="#16a34a")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="🟢 Google Sheet (Online)", fg="#15803d")
+        else:
+            self.status.config(text=f"💻 {msg}", fg="#475569")
+            if hasattr(self, 'lbl_data_source'):
+                self.lbl_data_source.config(text="💻 Local System (data.xlsx)", fg="#475569")
 
     def refresh_table(self):
         selected_month = self.current_selected_month.get()

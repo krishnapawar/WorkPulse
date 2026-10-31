@@ -302,7 +302,10 @@ In the top menu, click **Extensions** → **Apps Script**.
 6. In WorkPulse, click the green **"📊 Google Sheet"** button on the toolbar, paste your Web App URL, and click **"Test Connection"**!
 
 > [!TIP]
-> Enable the **"⚡ Auto-Sync"** checkbox in the Google Sheet dialog to have WorkPulse automatically sync the active month to your Google Sheet whenever you add, edit, or delete a task!
+> **Smart Hybrid Sync & Offline Fallback**:
+> - **Google Sheet Online**: When connected, WorkPulse fetches directly from Google Sheet, synchronizes changes into local `data.xlsx`, and displays the cloud data.
+> - **Local Offline Fallback**: If offline or Google Sheet is unreachable, WorkPulse automatically falls back to your local system (`data.xlsx`) without any interruption or data loss!
+> - Use the **"📥 Fetch Current Month"** or **"🌐 Fetch All Months"** buttons in the Google Sheet dialog to pull live spreadsheet data to your local machine anytime.
 
 ---
 
