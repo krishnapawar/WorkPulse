@@ -19,16 +19,35 @@ A feature-packed desktop work log, shift tracker, and team reporting tool built 
   * **Import Excel**: Bulk import existing tasks from external Excel files with visual column mapping.
 * **💬 LAN Team Chat (Same Wi-Fi Network)**:
   * **Zero-Config Peer Discovery**: Automatically detects all colleagues running WorkPulse on the same Wi-Fi / local network via UDP broadcast (no cloud server or external setup required).
-  * **Real-Time Instant Messaging**: Private, high-speed team chat that stays strictly within your local network.
+  * **Real-Time Instant Messaging**: High-speed, low-latency team chat running peer-to-peer strictly within your local network.
+  * **Direct 1-on-1 Private DMs**: Switch between the public `# team-general` room and private 1-on-1 DM channels with online colleagues. Enforces network-level packet privacy (incoming packets for other recipients are dropped), displays live unread message badges (`🔴 N new`), and includes an active channel header bar.
+  * **`@Mentions` Autocomplete & Highlighting**: Typing `@` triggers an intelligent autocomplete dropdown matching online colleagues, `@all`, and `@team` with keyboard navigation (<kbd>Up</kbd>, <kbd>Down</kbd>, <kbd>Tab</kbd>, <kbd>Enter</kbd>). Highlighted in golden badges with desktop notification alerts.
+  * **Pinned Messages & Team Announcements**: Right-click any message to "📌 Pin Announcement". Displays a persistent top banner with quote preview, `[🔍 Jump]` button, and `[✕ Unpin]` button, synchronized across all connected peers and stored in SQLite.
+  * **💻 Rich Code Snippet Blocks with 1-Click Copy**: Paste or type fenced code blocks (```python, ```bash, ```sql, etc.). Automatically formatted in dark syntax containers with language badges and a 1-click `[📋 Copy Code]` button.
+  * **🗳️ Interactive LAN Team Polls**: Create fast team decision polls (`🗳️ Poll`) with up to 5 options. Connected colleagues can vote directly inside chat bubbles with real-time percentage progress bars, voter counts, and single-choice voting logic.
+  * **📥 Chat History Export (Markdown & HTML)**: Export conversation logs for documentation, standups, or meeting minutes. Supports formatted GitHub-ready Markdown (`.md`) or standalone dark-mode HTML (`.html`) with avatars, quote previews, code blocks, and reaction pills.
+  * **🔕 Sound Notification Mute & Custom Focus Status Notes**: Toggle sound chimes on/off (`🔔 / 🔕`) with 1-click in the header. Broadcast a custom focus note (e.g., *"Working on Ticket #42 — DND until 4 PM"*) displayed right under your name in your colleagues' presence sidebar.
+  * **Direct Screenshot / Clipboard Image Paste (<kbd>Ctrl</kbd>+<kbd>V</kbd>)**: Take a screenshot with PrintScreen / Snipping Tool and press Ctrl+V or click "📷 Paste" to attach images directly with optional captions.
+  * **Inline Image Thumbnails & Full-Size Viewer**: Renders crisp inline image thumbnails directly within the chat stream with 1-click full-resolution viewing.
+  * **Contextual Message Reply / Quoting**: Click `↩️` on any message, file, or work log to open the floating reply dock and render contextual quote bubbles.
+  * **Emoji Reactions (👍, ❤️, 🚀, 🎉, 😂, 👀, 👏)**: Click `😊` or any existing reaction pill to add/toggle reactions in real-time across peers with participant tooltips.
   * **Live Colleague Presence & Status**: Real-time presence sidebar with status choices (🟢 Available, 🟡 Focus Mode, 🍱 Lunch Break, ☕ Tea Break, 🔴 In Meeting).
   * **One-Click "Share Today's Tasks"**: Instantly broadcast your today's task log and shift summary into the team chat.
+  * **High-Speed P2P File Sharing**: Share documents, archives, code, and images of any size directly between machines without third-party servers.
   * **Manual IP Connect Fallback**: "Add Colleague IP" tool to connect across restricted corporate Wi-Fi or isolated subnets.
-  * **Persistent SQLite Database Storage**: All messages, task logs, and shift cards are saved locally in an indexed SQLite database (`chat_history.db`) with thread-safe WAL mode and real-time history search (**🔍 Search**).
+  * **Persistent SQLite Database Storage**: All messages, task logs, images, and reactions are saved locally in an indexed SQLite database (`chat_history.db`) with thread-safe WAL mode and real-time history search (**🔍 Search**).
 * **📊 Google Sheets Cloud Synchronization**:
   * **1-Click Month & Bulk Sync**: Push your current month or all historical months into beautifully formatted tabs in your online Google Spreadsheet.
   * **Automated Professional Styling**: Formats header rows (`#1F4E79` navy blue), highlights weekly offs (`#DBEAFE` soft blue), holidays (`#FEF3C7` amber), and completed badges (`#DCFCE7` green) with auto-fitted columns.
   * **⚡ Real-Time Auto-Sync**: Automatically updates your Google Sheet tab in the background whenever a task is Added, Edited, or Deleted.
   * **Zero Cloud Console Friction**: Powered by a lightweight Google Apps Script Web App (`google_apps_script.js`). No Google Cloud IAM projects or service accounts required—setup takes 30 seconds!
+* **⏰ Remind Me & Schedule Suite**:
+  * **Automated Daily Shift Alerts**: Scheduled daily notifications reminding you to log in (10:00 AM), take lunch and tea breaks, and submit your daily work update & standup before logout (07:00 PM). Automatically skips weekends and company holidays.
+  * **1-Click Quick Reminders**: Instant presets (`10m`, `15m`, `30m`, `1h`, `2h`, `At Logout`) directly accessible from the header, form panel, and mobile UI.
+  * **Custom Task & Event Scheduler**: Schedule timed reminders for client meetings, code reviews, and deadline follow-ups with customizable repetition rules (`Once`, `Daily`, `Weekdays`, `Weekly`).
+  * **Interactive Floating Alerts**: On trigger, interactive popups provide 1-click contextual actions—`📝 Log Today's Work`, `🌅 Fill Login Time`, `💤 Snooze (10m / 30m)`, or `✅ Mark Done`.
+  * **Cross-Platform System Notifications**: Native desktop OS notifications (`notify-send` on Linux, AppleScript on macOS, PowerShell/Toast on Windows) paired with audio chimes and in-app toasts.
+  * **Full Mobile App (Kivy) Parity**: Android & touch-screen mobile interface includes the complete Remind Me & Schedule popup manager and background scheduler engine.
 * **🏖️ Holidays & Weekends**: Auto-marks weekly offs (custom days, 2nd & 4th Saturdays) and official company/national holidays.
 
 ---

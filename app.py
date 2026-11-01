@@ -20,7 +20,12 @@ from openpyxl.styles import Font, PatternFill, Alignment, Border, Side
 from openpyxl.utils import get_column_letter
 from openpyxl.utils.datetime import from_excel
 from collections import defaultdict
-from lan_chat import LANChatEngine, LANChatDialog, font_spec, show_desktop_notification, show_in_app_toast
+from lan_chat import LANChatEngine, LANChatDialog, font_spec, show_desktop_notification, show_in_app_toast, choose_file_dialog, choose_save_dialog
+from reminder_scheduler import (
+    ReminderSchedulerEngine, ReminderScheduleDialog, ReminderAlertWindow,
+    DEFAULT_DAILY_REMINDERS, DEFAULT_REMINDER_SETTINGS,
+    add_custom_reminder, delete_custom_reminder, toggle_custom_reminder_status, snooze_custom_reminder
+)
 
 _MAIN_THREAD_DISPATCHER_QUEUE = queue.Queue()
 
@@ -150,7 +155,14 @@ DEFAULT_SETTINGS = {
     "gsheet_webapp_url": "",
     "gsheet_auto_sync": True,
     "gsheet_fetch_priority": True,
-    "gsheet_last_sync": ""
+    "gsheet_last_sync": "",
+    "reminders_enabled": True,
+    "reminder_sound": True,
+    "reminder_desktop_notify": True,
+    "daily_shift_reminders_enabled": True,
+    "remind_skip_weekends_holidays": True,
+    "daily_reminders": DEFAULT_DAILY_REMINDERS,
+    "custom_reminders": []
 }
 
 # ---------- Settings Management ----------
@@ -199,6 +211,20 @@ def load_settings():
         merged["gsheet_auto_sync"] = True
     if "gsheet_fetch_priority" not in merged:
         merged["gsheet_fetch_priority"] = True
+    if "reminders_enabled" not in merged:
+        merged["reminders_enabled"] = True
+    if "reminder_sound" not in merged:
+        merged["reminder_sound"] = True
+    if "reminder_desktop_notify" not in merged:
+        merged["reminder_desktop_notify"] = True
+    if "daily_shift_reminders_enabled" not in merged:
+        merged["daily_shift_reminders_enabled"] = True
+    if "remind_skip_weekends_holidays" not in merged:
+        merged["remind_skip_weekends_holidays"] = True
+    if "daily_reminders" not in merged or not isinstance(merged["daily_reminders"], dict):
+        merged["daily_reminders"] = DEFAULT_DAILY_REMINDERS
+    if "custom_reminders" not in merged or not isinstance(merged["custom_reminders"], list):
+        merged["custom_reminders"] = []
     return merged
 
 def save_settings(settings_data):
@@ -2883,6 +2909,11 @@ class SettingsDialog(tk.Toplevel):
         self.notebook.add(tab_gsheet, text="  📊 Google Sheet  ")
         self.build_gsheet_tab(tab_gsheet)
 
+        # Tab 5: Reminders & Schedule
+        tab_reminders = tk.Frame(self.notebook, bg="#ffffff", padx=15, pady=12)
+        self.notebook.add(tab_reminders, text="  ⏰ Reminders & Schedule  ")
+        self.build_reminders_tab(tab_reminders)
+
         # Bottom Bar
         bottom = tk.Frame(self, bg="#f1f5f9", padx=15, pady=10)
         bottom.pack(fill=tk.X, side=tk.BOTTOM)
@@ -3317,6 +3348,42 @@ class SettingsDialog(tk.Toplevel):
         self.update()
         messagebox.showinfo("Copied", "📋 Google Apps Script code copied to clipboard!\n\nOpen your Google Sheet -> Extensions -> Apps Script -> Paste -> Deploy as Web app.")
 
+    def build_reminders_tab(self, parent):
+        box = tk.Frame(parent, bg="#ffffff")
+        box.pack(fill=tk.BOTH, expand=True)
+
+        tk.Label(box, text="⏰ Automated Reminders & Shift Scheduling", font=("Segoe UI", 11, "bold"), bg="#ffffff", fg="#1e293b").pack(anchor="w", pady=(0, 4))
+        tk.Label(box, text="WorkPulse automatically reminds you to log in, take breaks, and submit your daily work update before logout.", font=("Segoe UI", 8), bg="#ffffff", fg="#64748b").pack(anchor="w", pady=(0, 10))
+
+        self.var_reminders_en = tk.BooleanVar(value=self.settings.get("reminders_enabled", True))
+        chk_main = tk.Checkbutton(box, text="Enable Reminders & Scheduler System", variable=self.var_reminders_en, font=("Segoe UI", 9, "bold"), bg="#ffffff", fg="#1e40af", selectcolor="#ffffff")
+        chk_main.pack(anchor="w", pady=3)
+
+        self.var_rem_sound = tk.BooleanVar(value=self.settings.get("reminder_sound", True))
+        chk_snd = tk.Checkbutton(box, text="Play audio chime when reminder triggers", variable=self.var_rem_sound, font=("Segoe UI", 9), bg="#ffffff", selectcolor="#ffffff")
+        chk_snd.pack(anchor="w", pady=2)
+
+        self.var_rem_desktop = tk.BooleanVar(value=self.settings.get("reminder_desktop_notify", True))
+        chk_desk = tk.Checkbutton(box, text="Show native desktop system notification (Linux notify-send / Windows / macOS)", variable=self.var_rem_desktop, font=("Segoe UI", 9), bg="#ffffff", selectcolor="#ffffff")
+        chk_desk.pack(anchor="w", pady=2)
+
+        self.var_daily_rem_en = tk.BooleanVar(value=self.settings.get("daily_shift_reminders_enabled", True))
+        chk_daily = tk.Checkbutton(box, text="Automated Daily Shift Alerts (Login, Lunch, Tea, Work Update submission)", variable=self.var_daily_rem_en, font=("Segoe UI", 9), bg="#ffffff", selectcolor="#ffffff")
+        chk_daily.pack(anchor="w", pady=2)
+
+        self.var_rem_skip_holidays = tk.BooleanVar(value=self.settings.get("remind_skip_weekends_holidays", True))
+        chk_skip = tk.Checkbutton(box, text="Skip daily shift alerts on configured Weekly Offs and Holidays", variable=self.var_rem_skip_holidays, font=("Segoe UI", 9), bg="#ffffff", selectcolor="#ffffff")
+        chk_skip.pack(anchor="w", pady=2)
+
+        btn_mgr = tk.Button(
+            box, text="⏰ Open Full Remind Me & Schedule Manager",
+            font=("Segoe UI", 10, "bold"), bg="#2563eb", fg="white",
+            activebackground="#1d4ed8", activeforeground="white",
+            relief="flat", padx=14, pady=7, cursor="hand2",
+            command=lambda: ReminderScheduleDialog(self, app_ref=self.app_ref)
+        )
+        btn_mgr.pack(anchor="w", pady=(16, 0))
+
     def save(self):
         selected_offs = [d for d, var in self.off_vars.items() if var.get()]
         sec_fourth = getattr(self, "var_sec_fourth", tk.BooleanVar(value=False)).get()
@@ -3340,7 +3407,12 @@ class SettingsDialog(tk.Toplevel):
             "data_api_sync_on_delete": self.var_api_sync_on_delete.get() if hasattr(self, 'var_api_sync_on_delete') else True,
             "gsheet_webapp_url": self.entry_gsheet_url.get().strip() if hasattr(self, 'entry_gsheet_url') else self.settings.get("gsheet_webapp_url", ""),
             "gsheet_auto_sync": self.var_gsheet_auto_sync.get() if hasattr(self, 'var_gsheet_auto_sync') else self.settings.get("gsheet_auto_sync", False),
-            "gsheet_fetch_priority": self.var_gsheet_fetch_priority.get() if hasattr(self, 'var_gsheet_fetch_priority') else self.settings.get("gsheet_fetch_priority", True)
+            "gsheet_fetch_priority": self.var_gsheet_fetch_priority.get() if hasattr(self, 'var_gsheet_fetch_priority') else self.settings.get("gsheet_fetch_priority", True),
+            "reminders_enabled": self.var_reminders_en.get() if hasattr(self, 'var_reminders_en') else self.settings.get("reminders_enabled", True),
+            "reminder_sound": self.var_rem_sound.get() if hasattr(self, 'var_rem_sound') else self.settings.get("reminder_sound", True),
+            "reminder_desktop_notify": self.var_rem_desktop.get() if hasattr(self, 'var_rem_desktop') else self.settings.get("reminder_desktop_notify", True),
+            "daily_shift_reminders_enabled": self.var_daily_rem_en.get() if hasattr(self, 'var_daily_rem_en') else self.settings.get("daily_shift_reminders_enabled", True),
+            "remind_skip_weekends_holidays": self.var_rem_skip_holidays.get() if hasattr(self, 'var_rem_skip_holidays') else self.settings.get("remind_skip_weekends_holidays", True)
         })
         save_settings(self.settings)
         if hasattr(self.parent, 'settings') and isinstance(self.parent.settings, dict):
@@ -5980,7 +6052,7 @@ class ExcelBulkImportDialog(tk.Toplevel):
         btn_cancel.pack(side=tk.RIGHT, padx=6)
 
     def browse_file(self):
-        f = filedialog.askopenfilename(
+        f = choose_file_dialog(
             parent=self,
             title="Select Excel or CSV File for Bulk Import",
             filetypes=[
@@ -6302,10 +6374,10 @@ class ExcelBulkImportDialog(tk.Toplevel):
 
     def download_template(self):
         default_fn = f"timesheet_import_template_{datetime.date.today().strftime('%Y%m%d')}.xlsx"
-        f = filedialog.asksaveasfilename(
+        f = choose_save_dialog(
             parent=self,
             title="Save Sample Timesheet Import Template",
-            initialfile=default_fn,
+            default_name=default_fn,
             defaultextension=".xlsx",
             filetypes=[("Excel Workbook (*.xlsx)", "*.xlsx")]
         )
@@ -6424,6 +6496,13 @@ class TodayWorkUpdateApp:
         except Exception as e:
             print(f"Error starting LAN Chat Engine: {e}")
 
+        # Remind Me & Schedule System initialization
+        self.reminder_engine = ReminderSchedulerEngine.get_instance(app_ref=self)
+        try:
+            self.reminder_engine.start()
+        except Exception as e:
+            print(f"Error starting Reminder Scheduler Engine: {e}")
+
         # Ensure graceful shutdown on window close
         self.root.protocol("WM_DELETE_WINDOW", self.on_app_closing)
 
@@ -6445,6 +6524,7 @@ class TodayWorkUpdateApp:
 
         # Keyboard Shortcuts
         self.root.bind("<Control-comma>", lambda e: self.open_settings())
+        self.root.bind("<Control-Shift-R>", lambda e: self.open_reminders_dialog())
 
         # Check Google Sheet connection and auto-fetch in background if configured
         if is_google_sheet_configured(self.settings):
@@ -6517,6 +6597,9 @@ class TodayWorkUpdateApp:
         r2 = tk.Frame(right_box, bg="#1a365d")
         r2.pack(anchor="e")
 
+        btn_reminders = tk.Button(r2, text="⏰ Reminders", font=("Segoe UI", 8, "bold"), bg="#f59e0b", fg="white", activebackground="#d97706", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_reminders_dialog)
+        btn_reminders.pack(side=tk.LEFT, padx=2)
+
         btn_holidays = tk.Button(r2, text="🏖️ Weekends & Holidays", font=("Segoe UI", 8, "bold"), bg="#0284c7", fg="white", activebackground="#0369a1", activeforeground="white", relief="flat", padx=9, pady=2, cursor="hand2", command=self.open_weekend_holiday_settings)
         btn_holidays.pack(side=tk.LEFT, padx=2)
 
@@ -6568,6 +6651,10 @@ class TodayWorkUpdateApp:
         self.lbl_stat_lan.pack(side=tk.LEFT, padx=6, pady=7)
         self.lbl_stat_lan.bind("<Button-1>", lambda e: self.open_lan_chat())
 
+        self.lbl_stat_reminders = tk.Label(self.stats_frame, text="⏰ Reminders: Active", font=("Segoe UI", 10, "bold"), bg="#e2e8f0", fg="#b45309", cursor="hand2")
+        self.lbl_stat_reminders.pack(side=tk.LEFT, padx=6, pady=7)
+        self.lbl_stat_reminders.bind("<Button-1>", lambda e: self.open_reminders_dialog())
+
         # Shift summary on top right
         self.lbl_stat_shift = tk.Label(self.stats_frame, text="", font=("Segoe UI", 9, "bold"), bg="#e2e8f0", fg="#0369a1")
         self.lbl_stat_shift.pack(side=tk.RIGHT, padx=12, pady=7)
@@ -6603,6 +6690,9 @@ class TodayWorkUpdateApp:
 
         btn_bulk_quick = tk.Button(f_sub_btns, text="📋 Bulk Paste Text", font=("Segoe UI", 8, "bold"), bg="#fef3c7", fg="#92400e", relief="flat", pady=3, cursor="hand2", command=self.open_bulk_import_dialog)
         btn_bulk_quick.grid(row=1, column=1, sticky="nsew", padx=(2, 0), pady=0)
+
+        btn_remind_quick = tk.Button(f_sub_btns, text="⏰ Remind Me Later", font=("Segoe UI", 8, "bold"), bg="#fef3c7", fg="#b45309", relief="flat", pady=3, cursor="hand2", command=self.quick_remind_me_dialog)
+        btn_remind_quick.grid(row=2, column=0, columnspan=2, sticky="nsew", padx=0, pady=(2, 0))
 
         # Scrollable inputs canvas
         form_canvas_box = tk.Frame(form_card, bg="#ffffff")
@@ -7177,13 +7267,30 @@ class TodayWorkUpdateApp:
                 self.lbl_stat_lan.config(text=f"💬 LAN: {count} online", fg="#059669")
 
     def on_app_closing(self):
-        """Gracefully stop background LAN chat and exit application."""
+        """Gracefully stop background LAN chat and Reminder engine, then exit application."""
         try:
             if hasattr(self, 'lan_engine') and self.lan_engine:
                 self.lan_engine.stop()
         except Exception:
             pass
+        try:
+            if hasattr(self, 'reminder_engine') and self.reminder_engine:
+                self.reminder_engine.stop()
+        except Exception:
+            pass
         self.root.destroy()
+
+    def open_reminders_dialog(self):
+        """Opens the full Remind Me & Schedule Manager Dialog."""
+        ReminderScheduleDialog(self.root, app_ref=self)
+
+    def quick_remind_me_dialog(self):
+        """Quick 1-click Remind Me Later dialog pre-filled with current task details."""
+        task_title = self.entry_title.get().strip() if hasattr(self, 'entry_title') else ""
+        d = ReminderScheduleDialog(self.root, app_ref=self)
+        if task_title and hasattr(d, 'entry_rem_title'):
+            d.entry_rem_title.delete(0, tk.END)
+            d.entry_rem_title.insert(0, f"Submit update: {task_title}")
 
     def open_sync_api_dialog(self):
         SyncApiDialog(self.root)

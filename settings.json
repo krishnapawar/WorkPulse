@@ -236,6 +236,14 @@
             "tea": "05:30 PM - 05:45 PM",
             "lunch_taken": true,
             "tea_taken": true
+        },
+        "2026-11-01": {
+            "login": "-",
+            "logout": "-",
+            "lunch": "-",
+            "tea": "-",
+            "lunch_taken": true,
+            "tea_taken": true
         }
     },
     "recent_teammates": [],
@@ -249,5 +257,51 @@
     "gsheet_webapp_url": "https://script.google.com/macros/s/AKfycbzMVKAgy5fI12Cr3Lx8o3Rnq7wsfP9oUTioocvwh16Ak6Udef_GMPCnzTt22jPe2Sb3/exec",
     "gsheet_auto_sync": true,
     "gsheet_fetch_priority": true,
-    "gsheet_last_sync": "2026-10-31 23:56:04"
+    "gsheet_last_sync": "2026-11-01 11:42:44",
+    "reminders_enabled": true,
+    "reminder_sound": true,
+    "reminder_desktop_notify": true,
+    "daily_shift_reminders_enabled": true,
+    "remind_skip_weekends_holidays": true,
+    "daily_reminders": {
+        "login": {
+            "enabled": true,
+            "time": "10:00 AM",
+            "title": "\ud83c\udf05 Shift Login Reminder",
+            "message": "Good morning! Time to log in and start your work day."
+        },
+        "lunch": {
+            "enabled": true,
+            "time": "01:00 PM",
+            "title": "\ud83c\udf71 Lunch Break Reminder",
+            "message": "Time for lunch break! Step away and recharge."
+        },
+        "tea": {
+            "enabled": true,
+            "time": "04:30 PM",
+            "title": "\u2615 Tea Break Reminder",
+            "message": "Time for a quick tea break and stretch!"
+        },
+        "work_update": {
+            "enabled": true,
+            "time": "07:00 PM",
+            "title": "\ud83d\udcdd Daily Work Update & Standup Reminder",
+            "message": "Please log your completed tasks and submit today's work update before logout!"
+        }
+    },
+    "custom_reminders": [
+        {
+            "id": "rem_1793515423_1",
+            "title": "Submit Today's Work Update & Standup",
+            "notes": "",
+            "date": "2026-11-01",
+            "time": "12:14 PM",
+            "datetime": "2026-11-01 12:14 PM",
+            "repeat": "none",
+            "status": "completed",
+            "notify_desktop": true,
+            "created_at": "2026-11-01 12:13:43",
+            "completed_at": "2026-11-01 12:14:05"
+        }
+    ]
 }

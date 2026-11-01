@@ -23,6 +23,7 @@ try:
     from kivy.uix.button import Button  # type: ignore
     from kivy.uix.spinner import Spinner  # type: ignore
     from kivy.uix.popup import Popup  # type: ignore
+    from kivy.clock import Clock  # type: ignore
     try:
         from kivy.core.clipboard import Clipboard  # type: ignore
     except Exception:
@@ -33,13 +34,13 @@ try:
 except (ImportError, Exception):
     KIVY_AVAILABLE = False
     App = object
-    BoxLayout = GridLayout = ScrollView = Label = TextInput = Button = Spinner = Popup = Window = object
+    BoxLayout = GridLayout = ScrollView = Label = TextInput = Button = Spinner = Popup = Window = Clock = object
     Clipboard = None
 
     def get_color_from_hex(hex_str):  # type: ignore
         return (1, 1, 1, 1)
 
-# Import backend functions from app.py
+# Import backend functions from app.py & reminder_scheduler.py
 try:
     from app import (
         save_work_update, load_settings, save_settings,
@@ -48,6 +49,15 @@ try:
         format_date_only, FILE, sync_google_sheet_month,
         fetch_google_sheet_month, save_fetched_rows_to_excel,
         fetch_and_load_month_data
+    )
+except ImportError:
+    pass
+
+try:
+    from reminder_scheduler import (
+        ReminderSchedulerEngine, load_all_settings, save_all_settings,
+        add_custom_reminder, delete_custom_reminder, toggle_custom_reminder_status,
+        snooze_custom_reminder, format_minutes_to_time, parse_time_minutes
     )
 except ImportError:
     pass
@@ -63,22 +73,33 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         root = BoxLayout(orientation='vertical', padding=12, spacing=10)
 
         # 1. Header Banner
-        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=54, spacing=10)
+        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=54, spacing=8)
         lbl_title = Label(
             text="[b]📝 WorkPulse[/b]",
             markup=True,
-            font_size='22sp',
+            font_size='21sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.6,
+            size_hint_x=0.48,
             halign='left',
             valign='middle'
         )
         lbl_title.bind(size=lbl_title.setter('text_size'))
         header.add_widget(lbl_title)
 
+        btn_remind = Button(
+            text="⏰ Remind",
+            size_hint_x=0.26,
+            background_normal='',
+            background_color=get_color_from_hex("#f59e0b"),
+            color=(1, 1, 1, 1),
+            bold=True
+        )
+        btn_remind.bind(on_release=lambda x: self.open_reminders_popup())
+        header.add_widget(btn_remind)
+
         btn_today = Button(
             text="📅 Today",
-            size_hint_x=0.4,
+            size_hint_x=0.26,
             background_normal='',
             background_color=get_color_from_hex("#2563eb"),
             color=(1, 1, 1, 1),
@@ -336,6 +357,72 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     pass
             threading.Thread(target=_auto_fetch, daemon=True).start()
 
+        # Start Mobile Reminder Scheduler Engine
+        if 'ReminderSchedulerEngine' in globals():
+            def _on_mobile_trigger(item_type, title, message, reminder_id):
+                if KIVY_AVAILABLE and 'Clock' in globals() and Clock is not None:
+                    Clock.schedule_once(lambda dt: self.show_reminder_alert(title, message, item_type, reminder_id))
+            self.reminder_engine = ReminderSchedulerEngine(on_trigger_callback=_on_mobile_trigger)
+            try:
+                self.reminder_engine.start()
+            except Exception as e:
+                print(f"Error starting mobile reminder engine: {e}")
+
+    def on_stop(self):
+        if hasattr(self, 'reminder_engine') and self.reminder_engine:
+            try:
+                self.reminder_engine.stop()
+            except Exception:
+                pass
+
+    def open_reminders_popup(self):
+        if KIVY_AVAILABLE:
+            pop = ReminderMobilePopup(self)
+            pop.open()
+
+    def show_reminder_alert(self, title, msg, item_type="custom", reminder_id=None):
+        if not KIVY_AVAILABLE:
+            return
+        content = BoxLayout(orientation='vertical', padding=12, spacing=10)
+        content.add_widget(Label(text=f"[b]{title}[/b]\n\n{msg}", markup=True, font_size='15sp', color=(1, 1, 1, 1), halign='center'))
+
+        b_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=44, spacing=6)
+        popup = Popup(title="⏰ WorkPulse Reminder Alert", content=content, size_hint=(0.88, 0.42), auto_dismiss=False)
+
+        if item_type == "work_update":
+            btn_act = Button(text="📝 Fill Update", background_color=get_color_from_hex("#8b5cf6"), bold=True)
+            def _go_fill(x):
+                popup.dismiss()
+                self.in_title.focus = True
+            btn_act.bind(on_release=_go_fill)
+            b_row.add_widget(btn_act)
+        elif item_type == "login":
+            btn_act = Button(text="🌅 Set Login", background_color=get_color_from_hex("#0284c7"), bold=True)
+            def _set_log(x):
+                popup.dismiss()
+                self.in_login.text = datetime.datetime.now().strftime("%I:%M %p")
+            btn_act.bind(on_release=_set_log)
+            b_row.add_widget(btn_act)
+
+        btn_snooze = Button(text="💤 Snooze 10m", background_color=get_color_from_hex("#334155"), bold=True)
+        def _do_snooze(x):
+            popup.dismiss()
+            if hasattr(self, 'reminder_engine') and self.reminder_engine:
+                self.reminder_engine.snooze_runtime_reminder(title, msg, minutes=10, item_type=item_type, reminder_id=reminder_id)
+        btn_snooze.bind(on_release=_do_snooze)
+        b_row.add_widget(btn_snooze)
+
+        btn_done = Button(text="✅ Done", background_color=get_color_from_hex("#16a34a"), bold=True)
+        def _do_done(x):
+            popup.dismiss()
+            if item_type == "custom" and reminder_id and 'toggle_custom_reminder_status' in globals():
+                toggle_custom_reminder_status(reminder_id, "completed")
+        btn_done.bind(on_release=_do_done)
+        b_row.add_widget(btn_done)
+
+        content.add_widget(b_row)
+        popup.open()
+
     def show_popup(self, title, msg):
         content = BoxLayout(orientation='vertical', padding=12, spacing=10)
         content.add_widget(Label(text=msg, font_size='14sp', color=(1, 1, 1, 1)))
@@ -344,6 +431,210 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn.bind(on_release=popup.dismiss)
         content.add_widget(btn)
         popup.open()
+
+
+class ReminderMobilePopup(Popup if KIVY_AVAILABLE else object):
+    def __init__(self, app_ref, **kwargs):
+        super().__init__(**kwargs)
+        self.app_ref = app_ref
+        self.title = "⏰ Remind Me & Schedule - WorkPulse"
+        self.size_hint = (0.95, 0.92)
+        self.auto_dismiss = True
+
+        root_box = BoxLayout(orientation='vertical', padding=10, spacing=8)
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        content = GridLayout(cols=1, spacing=10, size_hint_y=None)
+        content.bind(minimum_height=content.setter('height'))
+
+        # 1. Quick Presets Section
+        content.add_widget(Label(text="[b]⚡ 1-Click Quick Presets[/b]", markup=True, size_hint_y=None, height=26, color=get_color_from_hex("#38bdf8"), halign='left'))
+
+        row_p1 = BoxLayout(orientation='horizontal', size_hint_y=None, height=38, spacing=6)
+        presets = [("10m", 10), ("15m", 15), ("30m", 30), ("1h", 60), ("2h", 120)]
+        for lbl, mins in presets:
+            btn_p = Button(text=lbl, background_color=get_color_from_hex("#0284c7"), color=(1, 1, 1, 1), bold=True)
+            btn_p.bind(on_release=lambda x, m=mins: self.apply_preset_mins(m))
+            row_p1.add_widget(btn_p)
+        content.add_widget(row_p1)
+
+        row_p2 = BoxLayout(orientation='horizontal', size_hint_y=None, height=38, spacing=6)
+        shift_presets = [("🌅 10:00 AM", "10:00 AM"), ("🍱 01:00 PM", "01:00 PM"), ("☕ 04:30 PM", "04:30 PM"), ("📝 07:00 PM", "07:00 PM")]
+        for lbl, t_v in shift_presets:
+            btn_s = Button(text=lbl, background_color=get_color_from_hex("#d97706"), color=(1, 1, 1, 1), bold=True)
+            btn_s.bind(on_release=lambda x, t=t_v: self.apply_preset_time(t))
+            row_p2.add_widget(btn_s)
+        content.add_widget(row_p2)
+
+        # 2. Custom Schedule Form
+        content.add_widget(Label(text="[b]➕ Schedule Custom Reminder[/b]", markup=True, size_hint_y=None, height=26, color=get_color_from_hex("#38bdf8"), halign='left'))
+
+        self.in_rem_title = TextInput(hint_text="Reminder title (e.g. Submit Standup, Client Sync)", multiline=False, size_hint_y=None, height=42, background_color=get_color_from_hex("#1e293b"), foreground_color=(1, 1, 1, 1))
+        content.add_widget(self.in_rem_title)
+
+        row_dt = BoxLayout(orientation='horizontal', size_hint_y=None, height=42, spacing=6)
+        today_s = datetime.date.today().strftime("%Y-%m-%d")
+        self.in_rem_date = TextInput(text=today_s, multiline=False, size_hint_x=0.5, background_color=get_color_from_hex("#1e293b"), foreground_color=(1, 1, 1, 1))
+
+        def_mins = (datetime.datetime.now().hour * 60 + datetime.datetime.now().minute + 30) % 1440
+        def_t = format_minutes_to_time(def_mins) if 'format_minutes_to_time' in globals() else "10:30 AM"
+        self.in_rem_time = TextInput(text=def_t, multiline=False, size_hint_x=0.5, background_color=get_color_from_hex("#1e293b"), foreground_color=(1, 1, 1, 1))
+        row_dt.add_widget(self.in_rem_date)
+        row_dt.add_widget(self.in_rem_time)
+        content.add_widget(row_dt)
+
+        row_rep_btn = BoxLayout(orientation='horizontal', size_hint_y=None, height=44, spacing=6)
+        self.sp_repeat = Spinner(
+            text='Once (No Repeat)',
+            values=('Once (No Repeat)', 'Daily', 'Weekdays', 'Weekly'),
+            size_hint_x=0.5,
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_add_rem = Button(
+            text="➕ Save Schedule",
+            bold=True,
+            size_hint_x=0.5,
+            background_color=get_color_from_hex("#16a34a"),
+            color=(1, 1, 1, 1)
+        )
+        btn_add_rem.bind(on_release=self.save_schedule)
+        row_rep_btn.add_widget(self.sp_repeat)
+        row_rep_btn.add_widget(btn_add_rem)
+        content.add_widget(row_rep_btn)
+
+        # 3. Daily Shift Alerts Quick Toggle
+        content.add_widget(Label(text="[b]⚙️ Daily Shift Alerts (Login, Breaks, Standup)[/b]", markup=True, size_hint_y=None, height=26, color=get_color_from_hex("#38bdf8"), halign='left'))
+
+        settings = load_all_settings() if 'load_all_settings' in globals() else {}
+        is_daily_on = settings.get("daily_shift_reminders_enabled", True)
+        self.btn_toggle_daily = Button(
+            text=f"Daily Shift Alerts: {'✅ ACTIVE' if is_daily_on else '❌ PAUSED'} (Tap to toggle)",
+            size_hint_y=None, height=42,
+            background_color=get_color_from_hex("#0f766e" if is_daily_on else "#475569"),
+            color=(1, 1, 1, 1),
+            bold=True
+        )
+        self.btn_toggle_daily.bind(on_release=self.toggle_daily_alerts)
+        content.add_widget(self.btn_toggle_daily)
+
+        # 4. Active Scheduled Reminders List
+        content.add_widget(Label(text="[b]📋 Active Schedules[/b]", markup=True, size_hint_y=None, height=26, color=get_color_from_hex("#38bdf8"), halign='left'))
+        self.rem_list_box = GridLayout(cols=1, spacing=6, size_hint_y=None)
+        self.rem_list_box.bind(minimum_height=self.rem_list_box.setter('height'))
+        content.add_widget(self.rem_list_box)
+        self.refresh_reminders_list()
+
+        scroll.add_widget(content)
+        root_box.add_widget(scroll)
+
+        # Close button at bottom
+        btn_close = Button(text="Close", size_hint_y=None, height=44, background_color=get_color_from_hex("#475569"))
+        btn_close.bind(on_release=self.dismiss)
+        root_box.add_widget(btn_close)
+
+        self.content = root_box
+
+    def apply_preset_mins(self, minutes):
+        target = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
+        self.in_rem_date.text = target.strftime("%Y-%m-%d")
+        self.in_rem_time.text = target.strftime("%I:%M %p")
+
+    def apply_preset_time(self, time_val):
+        self.in_rem_date.text = datetime.date.today().strftime("%Y-%m-%d")
+        self.in_rem_time.text = time_val
+
+    def save_schedule(self, *args):
+        title = self.in_rem_title.text.strip()
+        date_v = self.in_rem_date.text.strip()
+        time_v = self.in_rem_time.text.strip()
+        rep_val = self.sp_repeat.text
+
+        rep_map = {
+            "Once (No Repeat)": "none",
+            "Daily": "daily",
+            "Weekdays": "weekdays",
+            "Weekly": "weekly"
+        }
+        repeat = rep_map.get(rep_val, "none")
+
+        if not title:
+            if hasattr(self.app_ref, 'show_popup'):
+                self.app_ref.show_popup("Notice", "Please enter a Reminder Title.")
+            return
+
+        if 'add_custom_reminder' in globals():
+            add_custom_reminder(title, date_v, time_v, repeat=repeat)
+            self.in_rem_title.text = ""
+            self.refresh_reminders_list()
+            if hasattr(self.app_ref, 'show_popup'):
+                self.app_ref.show_popup("Scheduled", f"✅ Reminder '{title}' scheduled!")
+
+    def toggle_daily_alerts(self, *args):
+        if 'load_all_settings' in globals() and 'save_all_settings' in globals():
+            settings = load_all_settings()
+            new_val = not settings.get("daily_shift_reminders_enabled", True)
+            settings["daily_shift_reminders_enabled"] = new_val
+            save_all_settings(settings)
+            self.btn_toggle_daily.text = f"Daily Shift Alerts: {'✅ ACTIVE' if new_val else '❌ PAUSED'} (Tap to toggle)"
+            self.btn_toggle_daily.background_color = get_color_from_hex("#0f766e" if new_val else "#475569")
+
+    def refresh_reminders_list(self):
+        self.rem_list_box.clear_widgets()
+        if 'load_all_settings' not in globals():
+            return
+        settings = load_all_settings()
+        reminders = settings.get("custom_reminders", [])
+
+        if not reminders:
+            self.rem_list_box.add_widget(Label(text="No scheduled reminders yet.", size_hint_y=None, height=30, color=get_color_from_hex("#64748b")))
+            return
+
+        for r in reversed(reminders[-8:]):
+            st = r.get("status", "pending")
+            status_icon = "⏰" if st == "pending" else "✅"
+            row = BoxLayout(orientation='horizontal', size_hint_y=None, height=38, spacing=6)
+
+            lbl = Label(
+                text=f"{status_icon} [b]{r.get('title')}[/b] • {r.get('datetime', '')}",
+                markup=True,
+                size_hint_x=0.7,
+                halign='left',
+                color=get_color_from_hex("#f8fafc" if st == "pending" else "#94a3b8")
+            )
+            lbl.bind(size=lbl.setter('text_size'))
+            row.add_widget(lbl)
+
+            r_id = r.get("id")
+            btn_done = Button(
+                text="Done" if st == "pending" else "Undo",
+                size_hint_x=0.15,
+                background_color=get_color_from_hex("#0284c7"),
+                bold=True
+            )
+            btn_done.bind(on_release=lambda x, rid=r_id: self._toggle_status(rid))
+            row.add_widget(btn_done)
+
+            btn_del = Button(
+                text="Del",
+                size_hint_x=0.15,
+                background_color=get_color_from_hex("#dc2626"),
+                bold=True
+            )
+            btn_del.bind(on_release=lambda x, rid=r_id: self._delete_item(rid))
+            row.add_widget(btn_del)
+
+            self.rem_list_box.add_widget(row)
+
+    def _toggle_status(self, rem_id):
+        if 'toggle_custom_reminder_status' in globals():
+            toggle_custom_reminder_status(rem_id)
+            self.refresh_reminders_list()
+
+    def _delete_item(self, rem_id):
+        if 'delete_custom_reminder' in globals():
+            delete_custom_reminder(rem_id)
+            self.refresh_reminders_list()
+
 
 if __name__ == "__main__":
     if KIVY_AVAILABLE:
