@@ -25,6 +25,7 @@ mkdir -p "$PKG_DIR/usr/bin"
 mkdir -p "$PKG_DIR/usr/share/applications"
 mkdir -p "$PKG_DIR/usr/share/icons/hicolor/512x512/apps"
 mkdir -p "$PKG_DIR/usr/share/icons/hicolor/128x128/apps"
+mkdir -p "$PKG_DIR/usr/share/pixmaps"
 mkdir -p "$DIST_DIR"
 
 # 1. DEBIAN/control file
@@ -34,7 +35,7 @@ Version: ${VERSION}
 Section: utils
 Priority: optional
 Architecture: all
-Depends: python3, python3-tk, python3-openpyxl | python3-pip
+Depends: python3, python3-tk, zenity, python3-openpyxl | python3-pip
 Maintainer: WorkPulse Team <support@workpulse.local>
 Description: Desktop work update logger, shift tracker, and team standup generator
  WorkPulse is a feature-packed desktop work update manager, shift tracker,
@@ -49,6 +50,7 @@ cp "$DIR/lan_chat.py" "$PKG_DIR/opt/workpulse/"
 cp "$DIR/reminder_scheduler.py" "$PKG_DIR/opt/workpulse/"
 cp "$DIR/requirements.txt" "$PKG_DIR/opt/workpulse/"
 cp "$DIR/settings.json" "$PKG_DIR/opt/workpulse/"
+cp "$DIR/data.xlsx" "$PKG_DIR/opt/workpulse/" 2>/dev/null || true
 cp -r "$DIR/assets" "$PKG_DIR/opt/workpulse/"
 
 # 3. Create opt launcher wrapper
@@ -62,6 +64,9 @@ mkdir -p "$APP_DATA"
 # Seed default data.xlsx & settings if not present
 if [ ! -f "$APP_DATA/settings.json" ]; then
     cp /opt/workpulse/settings.json "$APP_DATA/settings.json" 2>/dev/null || true
+fi
+if [ -f /opt/workpulse/data.xlsx ] && [ ! -f "$APP_DATA/data.xlsx" ]; then
+    cp /opt/workpulse/data.xlsx "$APP_DATA/data.xlsx" 2>/dev/null || true
 fi
 
 cd "$APP_DATA"
@@ -91,11 +96,17 @@ Keywords=work;update;pulse;tasks;shift;timesheet;logger;excel;
 EOF
 
 # 6. Icons
-if [ -f "$DIR/assets/icon.png" ]; then
+if [ -f "$DIR/assets/icon_512.png" ]; then
+    cp "$DIR/assets/icon_512.png" "$PKG_DIR/usr/share/icons/hicolor/512x512/apps/workpulse.png"
+elif [ -f "$DIR/assets/icon.png" ]; then
     cp "$DIR/assets/icon.png" "$PKG_DIR/usr/share/icons/hicolor/512x512/apps/workpulse.png"
 fi
+
 if [ -f "$DIR/assets/icon_128.png" ]; then
     cp "$DIR/assets/icon_128.png" "$PKG_DIR/usr/share/icons/hicolor/128x128/apps/workpulse.png"
+    cp "$DIR/assets/icon_128.png" "$PKG_DIR/usr/share/pixmaps/workpulse.png"
+elif [ -f "$DIR/assets/icon.png" ]; then
+    cp "$DIR/assets/icon.png" "$PKG_DIR/usr/share/pixmaps/workpulse.png"
 fi
 
 # 7. Build .deb package using dpkg-deb
