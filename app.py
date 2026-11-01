@@ -1,5 +1,24 @@
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog
+    import tkinter.font as tkfont
+    TK_AVAILABLE = True
+except (ImportError, Exception):
+    class DummyTk:
+        class Toplevel: pass
+        class Frame: pass
+        class Tk: pass
+        class Canvas: pass
+        class Entry: pass
+        class Text: pass
+        class Label: pass
+        class Button: pass
+    tk = DummyTk()
+    ttk = None
+    messagebox = None
+    filedialog = None
+    tkfont = None
+    TK_AVAILABLE = False
 import os
 import sys
 import subprocess

@@ -32,9 +32,27 @@ import urllib.parse
 import http.server
 import re
 import html
-import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
-import tkinter.font as tkfont
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox, filedialog
+    import tkinter.font as tkfont
+    TK_AVAILABLE = True
+except (ImportError, Exception):
+    class DummyTk:
+        class Toplevel: pass
+        class Frame: pass
+        class Tk: pass
+        class Canvas: pass
+        class Entry: pass
+        class Text: pass
+        class Label: pass
+        class Button: pass
+    tk = DummyTk()
+    ttk = None
+    messagebox = None
+    filedialog = None
+    tkfont = None
+    TK_AVAILABLE = False
 import shutil
 import tempfile
 import webbrowser

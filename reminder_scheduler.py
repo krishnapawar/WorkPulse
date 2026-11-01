@@ -13,8 +13,24 @@ import datetime
 import calendar
 import threading
 import subprocess
-import tkinter as tk
-from tkinter import ttk, messagebox
+try:
+    import tkinter as tk
+    from tkinter import ttk, messagebox
+    TK_AVAILABLE = True
+except (ImportError, Exception):
+    class DummyTk:
+        class Toplevel: pass
+        class Frame: pass
+        class Tk: pass
+        class Canvas: pass
+        class Entry: pass
+        class Text: pass
+        class Label: pass
+        class Button: pass
+    tk = DummyTk()
+    ttk = None
+    messagebox = None
+    TK_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
 # Default Configuration & Schemas
