@@ -36,6 +36,9 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import tkinter.font as tkfont
 import shutil
+import tempfile
+import webbrowser
+import mimetypes
 
 # Default port for WorkPulse LAN Chat
 DEFAULT_LAN_PORT = 45454
@@ -684,6 +687,70 @@ def show_in_app_toast(master, title, message, icon="💬", on_click=None, durati
     except Exception as e:
         print(f"Toast warning: {e}")
         return None
+
+
+def play_sound_alert(alert_type="message"):
+    """
+    Plays an audible chime for incoming messages, mentions, or file completions.
+    Runs asynchronously on a background thread so UI never stutters.
+    Works natively across Linux (pw-play, paplay, canberra-gtk-play), Windows (winsound), and macOS (afplay).
+    """
+    def _worker():
+        try:
+            if sys.platform.startswith("linux"):
+                sound_map = {
+                    "mention": [
+                        "/usr/share/sounds/freedesktop/stereo/bell.oga",
+                        "/usr/share/sounds/freedesktop/stereo/dialog-warning.oga",
+                        "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga"
+                    ],
+                    "complete": [
+                        "/usr/share/sounds/freedesktop/stereo/complete.oga",
+                        "/usr/share/sounds/freedesktop/stereo/device-added.oga",
+                        "/usr/share/sounds/freedesktop/stereo/bell.oga"
+                    ],
+                    "message": [
+                        "/usr/share/sounds/freedesktop/stereo/message-new-instant.oga",
+                        "/usr/share/sounds/freedesktop/stereo/message.oga",
+                        "/usr/share/sounds/freedesktop/stereo/audio-volume-change.oga"
+                    ]
+                }
+                candidates = sound_map.get(alert_type, sound_map["message"])
+                sound_path = next((p for p in candidates if os.path.exists(p)), None)
+
+                # 1. PipeWire pw-play
+                if sound_path and shutil.which("pw-play"):
+                    subprocess.run(["pw-play", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                    return
+                # 2. PulseAudio paplay
+                if sound_path and shutil.which("paplay"):
+                    subprocess.run(["paplay", sound_path], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                    return
+                # 3. Canberra
+                if shutil.which("canberra-gtk-play"):
+                    c_id = "message-new-instant" if alert_type == "message" else ("complete" if alert_type == "complete" else "bell")
+                    subprocess.run(["canberra-gtk-play", "-i", c_id], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                    return
+
+            elif sys.platform == "win32":
+                import winsound
+                if alert_type == "mention":
+                    winsound.MessageBeep(winsound.MB_ICONEXCLAMATION)
+                elif alert_type == "complete":
+                    winsound.MessageBeep(winsound.MB_OK)
+                else:
+                    winsound.MessageBeep(winsound.MB_ICONASTERISK)
+                return
+
+            elif sys.platform == "darwin":
+                sound_p = "/System/Library/Sounds/Glass.aiff"
+                if os.path.exists(sound_p):
+                    subprocess.run(["afplay", sound_p], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2)
+                    return
+        except Exception:
+            pass
+
+    threading.Thread(target=_worker, daemon=True, name="LANChat-AudioChime").start()
 
 
 def choose_file_dialog(parent=None, title="Select File", filetypes=None, initialdir=None):
@@ -1409,7 +1476,13 @@ class LANChatEngine:
             def log_message(self, format, *args):
                 pass  # Suppress console noise
 
+            def do_HEAD(self):
+                self._serve_file(is_head=True)
+
             def do_GET(self):
+                self._serve_file(is_head=False)
+
+            def _serve_file(self, is_head=False):
                 parsed = urllib.parse.urlparse(self.path)
                 parts = [p for p in parsed.path.split('/') if p]
                 if len(parts) >= 2 and parts[0] == "files":
@@ -1419,24 +1492,66 @@ class LANChatEngine:
                         fpath = info["path"]
                         fsize = os.path.getsize(fpath)
                         fname = info.get("name") or os.path.basename(fpath)
+                        mime_type = mimetypes.guess_type(fname)[0] or "application/octet-stream"
+
+                        # Support HTTP Range requests (essential for smooth video streaming & scrub-bar seeking)
+                        range_header = self.headers.get("Range")
+                        if range_header and range_header.startswith("bytes="):
+                            try:
+                                r_spec = range_header.split("=")[1].strip()
+                                s_str, e_str = r_spec.split("-")
+                                start = int(s_str) if s_str else 0
+                                end = int(e_str) if e_str else fsize - 1
+                                end = min(end, fsize - 1)
+                                length = end - start + 1
+
+                                self.send_response(206)
+                                self.send_header("Content-Type", mime_type)
+                                self.send_header("Content-Range", f"bytes {start}-{end}/{fsize}")
+                                self.send_header("Content-Length", str(length))
+                                self.send_header("Accept-Ranges", "bytes")
+                                self.send_header("Content-Disposition", f'inline; filename="{fname}"')
+                                self.end_headers()
+
+                                if not is_head:
+                                    with open(fpath, "rb") as f:
+                                        f.seek(start)
+                                        rem = length
+                                        while rem > 0:
+                                            chunk = f.read(min(65536, rem))
+                                            if not chunk:
+                                                break
+                                            self.wfile.write(chunk)
+                                            rem -= len(chunk)
+                                return
+                            except (BrokenPipeError, ConnectionResetError):
+                                return
+                            except Exception:
+                                pass
+
+                        # Full content response
                         self.send_response(200)
-                        self.send_header("Content-Type", "application/octet-stream")
+                        self.send_header("Content-Type", mime_type)
                         self.send_header("Content-Length", str(fsize))
-                        self.send_header("Content-Disposition", f'attachment; filename="{fname}"')
+                        self.send_header("Accept-Ranges", "bytes")
+                        self.send_header("Content-Disposition", f'inline; filename="{fname}"')
                         self.end_headers()
-                        try:
-                            with open(fpath, "rb") as f:
-                                while True:
-                                    chunk = f.read(65536)
-                                    if not chunk:
-                                        break
-                                    self.wfile.write(chunk)
-                        except (BrokenPipeError, ConnectionResetError):
-                            pass
+
+                        if not is_head:
+                            try:
+                                with open(fpath, "rb") as f:
+                                    while True:
+                                        chunk = f.read(65536)
+                                        if not chunk:
+                                            break
+                                        self.wfile.write(chunk)
+                            except (BrokenPipeError, ConnectionResetError):
+                                pass
                         return
                 self.send_response(404)
                 self.end_headers()
-                self.wfile.write(b"File not found or transfer completed.")
+                if not is_head:
+                    self.wfile.write(b"File not found or transfer completed.")
 
         try:
             self.file_server = http.server.HTTPServer(("0.0.0.0", 0), LANFileHTTPHandler)
@@ -1850,11 +1965,11 @@ class LANChatEngine:
                 self.on_reaction(msg_id, updated_reactions)
 
     def download_file(self, msg_obj, target_dir=None, custom_save_path=None,
-                      on_progress=None, on_done=None, on_error=None):
-        """Asynchronously streams a file from the sender's HTTP file server."""
+                      on_progress=None, on_done=None, on_error=None, cancel_event=None):
+        """Asynchronously streams a file from the sender's HTTP file server with speed calculation & cancellation."""
         def _worker():
             try:
-                f_ip = msg_obj.get("file_ip")
+                f_ip = msg_obj.get("file_ip") or msg_obj.get("sender_ip")
                 f_port = msg_obj.get("file_port")
                 f_id = msg_obj.get("file_id")
                 f_name = msg_obj.get("file_name", "downloaded_file")
@@ -1880,15 +1995,44 @@ class LANChatEngine:
                     read_bytes = 0
                     os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
                     tmp_dest = dest + ".wp_part"
+                    t_start = time.time()
+                    last_calc_t = t_start
+                    last_calc_b = 0
+                    current_spd = 0.0
+
                     with open(tmp_dest, "wb") as f_out:
                         while True:
+                            if cancel_event and cancel_event.is_set():
+                                f_out.close()
+                                if os.path.exists(tmp_dest):
+                                    try:
+                                        os.remove(tmp_dest)
+                                    except Exception:
+                                        pass
+                                if on_error:
+                                    on_error("Download cancelled by user.")
+                                return
+
                             chunk = resp.read(65536)
                             if not chunk:
                                 break
                             f_out.write(chunk)
                             read_bytes += len(chunk)
+
+                            now_t = time.time()
+                            if now_t - last_calc_t >= 0.2:
+                                current_spd = (read_bytes - last_calc_b) / max(0.001, (now_t - last_calc_t))
+                                last_calc_t = now_t
+                                last_calc_b = read_bytes
+
+                            eta_s = (total_bytes - read_bytes) / current_spd if current_spd > 0 and total_bytes > read_bytes else 0.0
+
                             if on_progress and total_bytes > 0:
-                                on_progress(read_bytes, total_bytes)
+                                try:
+                                    on_progress(read_bytes, total_bytes, current_spd, eta_s)
+                                except TypeError:
+                                    on_progress(read_bytes, total_bytes)
+
                     if os.path.exists(dest):
                         os.remove(dest)
                     os.rename(tmp_dest, dest)
@@ -2493,6 +2637,10 @@ class LANChatDialog:
         self.mention_listbox = None
         self.mention_candidates = []
 
+        # In-Chat Quick Find (Ctrl+F) state
+        self.find_matches = []
+        self.find_index = -1
+
         self._build_header()
         self._build_body()
         self._populate_initial_data()
@@ -2512,7 +2660,9 @@ class LANChatDialog:
 
         # Keyboard shortcuts
         def _on_escape(e):
-            if self.mention_popup and self.mention_popup.winfo_exists():
+            if hasattr(self, "find_bar") and self.find_bar.winfo_viewable():
+                self._close_find_bar()
+            elif self.mention_popup and self.mention_popup.winfo_exists():
                 self._close_mention_popup()
             elif self.active_reply or self.pending_image:
                 if self.active_reply:
@@ -2522,6 +2672,8 @@ class LANChatDialog:
             else:
                 self.dialog.destroy()
         self.dialog.bind("<Escape>", _on_escape)
+        self.dialog.bind("<Control-f>", lambda e: (self._toggle_find_bar(), "break")[1])
+        self.dialog.bind("<Control-F>", lambda e: (self._toggle_find_bar(), "break")[1])
 
         # Clean-up on close
         self.dialog.protocol("WM_DELETE_WINDOW", self._on_close)
@@ -2825,6 +2977,23 @@ class LANChatDialog:
         )
         # (Packed only when in DM)
 
+        # Quick Find trigger button in room bar
+        self.btn_quick_find = tk.Button(
+            self.room_bar,
+            text="🔍 Find (Ctrl+F)",
+            font=font_spec(10, "bold"),
+            bg="#1e293b",
+            fg="#94a3b8",
+            activebackground="#334155",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=self._toggle_find_bar
+        )
+        self.btn_quick_find.pack(side=tk.RIGHT, padx=4)
+
         left_room_f = tk.Frame(self.room_bar, bg="#0f172a")
         left_room_f.pack(side=tk.LEFT, fill=tk.X, expand=True)
 
@@ -2849,12 +3018,85 @@ class LANChatDialog:
         # Top Pinned Announcement Banner (Under Room Bar)
         self.pin_banner = tk.Frame(chat_box, bg="#1e293b", bd=1, relief="solid", padx=12, pady=6)
 
-        # Scrollable Messages Canvas
-        msg_canvas_box = tk.Frame(chat_box, bg="#0f172a")
-        msg_canvas_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+        # Quick Find (Ctrl+F) In-Chat Search Bar
+        self.find_bar = tk.Frame(chat_box, bg="#1e293b", bd=1, relief="solid", padx=10, pady=5)
+        # (Packed dynamically above self.msg_canvas_box when active)
 
-        self.msg_canvas = tk.Canvas(msg_canvas_box, bg="#0f172a", highlightthickness=0)
-        self.msg_scroll = ttk.Scrollbar(msg_canvas_box, orient=tk.VERTICAL, command=self.msg_canvas.yview)
+        lbl_f_icon = tk.Label(self.find_bar, text="🔍", font=font_spec(11), fg="#38bdf8", bg="#1e293b")
+        lbl_f_icon.pack(side=tk.LEFT, padx=(0, 6))
+
+        self.entry_find = tk.Entry(
+            self.find_bar,
+            font=font_spec(11),
+            bg="#0f172a",
+            fg="#ffffff",
+            insertbackground="#ffffff",
+            relief="flat",
+            bd=3
+        )
+        self.entry_find.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 8), ipady=3)
+        self.entry_find.bind("<KeyRelease>", self._on_find_key_release)
+        self.entry_find.bind("<Return>", lambda e: self._find_next())
+        self.entry_find.bind("<Shift-Return>", lambda e: self._find_prev())
+        self.entry_find.bind("<Escape>", lambda e: (self._close_find_bar(), "break")[1])
+
+        self.lbl_find_count = tk.Label(self.find_bar, text="0 matches", font=font_spec(10, "bold"), fg="#94a3b8", bg="#1e293b")
+        self.lbl_find_count.pack(side=tk.LEFT, padx=(0, 8))
+
+        btn_f_prev = tk.Button(
+            self.find_bar,
+            text="▲ Prev",
+            font=font_spec(9, "bold"),
+            bg="#334155",
+            fg="#f8fafc",
+            activebackground="#475569",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=7,
+            pady=2,
+            cursor="hand2",
+            command=self._find_prev
+        )
+        btn_f_prev.pack(side=tk.LEFT, padx=2)
+
+        btn_f_next = tk.Button(
+            self.find_bar,
+            text="▼ Next",
+            font=font_spec(9, "bold"),
+            bg="#334155",
+            fg="#f8fafc",
+            activebackground="#475569",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=7,
+            pady=2,
+            cursor="hand2",
+            command=self._find_next
+        )
+        btn_f_next.pack(side=tk.LEFT, padx=2)
+
+        btn_f_close = tk.Button(
+            self.find_bar,
+            text="✕",
+            font=font_spec(10, "bold"),
+            bg="#1e293b",
+            fg="#94a3b8",
+            activebackground="#334155",
+            activeforeground="#f87171",
+            relief="flat",
+            padx=6,
+            pady=2,
+            cursor="hand2",
+            command=self._close_find_bar
+        )
+        btn_f_close.pack(side=tk.LEFT, padx=(4, 0))
+
+        # Scrollable Messages Canvas
+        self.msg_canvas_box = tk.Frame(chat_box, bg="#0f172a")
+        self.msg_canvas_box.pack(fill=tk.BOTH, expand=True, padx=8, pady=6)
+
+        self.msg_canvas = tk.Canvas(self.msg_canvas_box, bg="#0f172a", highlightthickness=0)
+        self.msg_scroll = ttk.Scrollbar(self.msg_canvas_box, orient=tk.VERTICAL, command=self.msg_canvas.yview)
         self.msg_inner = tk.Frame(self.msg_canvas, bg="#0f172a")
 
         self.msg_canvas.configure(yscrollcommand=self.msg_scroll.set)
@@ -3010,6 +3252,8 @@ class LANChatDialog:
         self.entry_msg.bind("<Tab>", self._on_mention_tab)
         self.entry_msg.bind("<Control-v>", self._on_clipboard_paste)
         self.entry_msg.bind("<Control-V>", self._on_clipboard_paste)
+        self.entry_msg.bind("<Control-f>", lambda e: (self._toggle_find_bar(), "break")[1])
+        self.entry_msg.bind("<Control-F>", lambda e: (self._toggle_find_bar(), "break")[1])
 
     def _on_entry_focus_in(self, event=None):
         if getattr(self, "_is_placeholder_active", False) or self.entry_msg.get() == self.msg_placeholder:
@@ -3032,6 +3276,168 @@ class LANChatDialog:
 
         self.dialog.after(100, lambda: self.msg_canvas.yview_moveto(1.0))
         self._refresh_peers_ui(self.engine.get_online_peers())
+
+    # ---------- In-Chat Quick Find (Ctrl+F) Methods ----------
+
+    def _extract_searchable_text(self, msg):
+        """Extracts all human-readable text from a message object for full-text search."""
+        if not isinstance(msg, dict):
+            return ""
+        parts = []
+        for k in ("text", "caption", "title", "user_name", "file_name", "shift_str", "total_hours"):
+            v = msg.get(k)
+            if v:
+                parts.append(str(v))
+        tasks = msg.get("tasks")
+        if isinstance(tasks, list):
+            for t in tasks:
+                if isinstance(t, dict):
+                    parts.extend([str(t.get(k, "")) for k in ("title", "desc", "project", "task", "status") if t.get(k)])
+                elif isinstance(t, str):
+                    parts.append(t)
+        question = msg.get("question")
+        if question:
+            parts.append(str(question))
+        options = msg.get("options")
+        if isinstance(options, list):
+            for opt in options:
+                if isinstance(opt, dict) and opt.get("text"):
+                    parts.append(str(opt.get("text")))
+        return " ".join(parts).lower()
+
+    def _open_find_bar(self):
+        """Opens and focuses the in-chat quick find bar."""
+        if not hasattr(self, "find_bar"):
+            return
+        if not self.find_bar.winfo_viewable():
+            self.find_bar.pack(before=self.msg_canvas_box, fill=tk.X, padx=8, pady=(0, 4))
+        self.entry_find.focus_set()
+        self.entry_find.select_range(0, tk.END)
+        if self.entry_find.get().strip():
+            self._run_find()
+
+    def _close_find_bar(self):
+        """Closes the find bar, clears match highlights, and restores input focus."""
+        if not hasattr(self, "find_bar"):
+            return
+        if self.find_bar.winfo_viewable():
+            self.find_bar.pack_forget()
+        self._clear_find_highlights()
+        self.find_matches = []
+        self.find_index = -1
+        try:
+            self.entry_msg.focus_set()
+        except Exception:
+            pass
+
+    def _toggle_find_bar(self):
+        """Toggles find bar visibility."""
+        if not hasattr(self, "find_bar"):
+            return
+        if self.find_bar.winfo_viewable():
+            self._close_find_bar()
+        else:
+            self._open_find_bar()
+
+    def _on_find_key_release(self, event=None):
+        if event and event.keysym in ("Return", "Shift_L", "Shift_R", "Escape", "Up", "Down"):
+            return
+        self._run_find()
+
+    def _run_find(self):
+        """Searches all messages in the chat feed matching the search query."""
+        if not hasattr(self, "entry_find"):
+            return
+        query = self.entry_find.get().strip().lower()
+        self._clear_find_highlights()
+        self.find_matches = []
+        self.find_index = -1
+
+        if not query:
+            self.lbl_find_count.config(text="0 matches", fg="#94a3b8")
+            return
+
+        for child in self.msg_inner.winfo_children():
+            msg = getattr(child, "_msg_data", None)
+            if not msg:
+                continue
+            text = self._extract_searchable_text(msg)
+            if query in text:
+                self.find_matches.append(child)
+
+        total = len(self.find_matches)
+        if total == 0:
+            self.lbl_find_count.config(text="No matches", fg="#ef4444")
+        else:
+            for w in self.find_matches:
+                target = getattr(w, "_highlight_target", None) or w
+                try:
+                    target.config(highlightthickness=2, highlightbackground="#0284c7")
+                except Exception:
+                    pass
+            self.find_index = total - 1
+            self._update_active_match()
+
+    def _update_active_match(self):
+        """Highlights the active match with an amber glow and scrolls to it."""
+        total = len(self.find_matches)
+        if total == 0 or self.find_index < 0:
+            return
+
+        for i, w in enumerate(self.find_matches):
+            target = getattr(w, "_highlight_target", None) or w
+            try:
+                if i == self.find_index:
+                    target.config(highlightthickness=3, highlightbackground="#f59e0b")
+                else:
+                    target.config(highlightthickness=2, highlightbackground="#0284c7")
+            except Exception:
+                pass
+
+        self.lbl_find_count.config(
+            text=f"{self.find_index + 1} of {total}",
+            fg="#f59e0b"
+        )
+        active_w = self.find_matches[self.find_index]
+        self._scroll_to_message(active_w)
+
+    def _find_next(self, event=None):
+        if not self.find_matches:
+            return "break"
+        self.find_index = (self.find_index + 1) % len(self.find_matches)
+        self._update_active_match()
+        return "break"
+
+    def _find_prev(self, event=None):
+        if not self.find_matches:
+            return "break"
+        self.find_index = (self.find_index - 1) % len(self.find_matches)
+        self._update_active_match()
+        return "break"
+
+    def _clear_find_highlights(self):
+        for child in self.msg_inner.winfo_children():
+            target = getattr(child, "_highlight_target", None) or child
+            try:
+                target.config(highlightthickness=0)
+            except Exception:
+                pass
+
+    def _scroll_to_message(self, row_frame):
+        """Smoothly scrolls the canvas so that row_frame is centered in view."""
+        self.dialog.update_idletasks()
+        try:
+            total_h = self.msg_inner.winfo_height()
+            if total_h <= 0:
+                return
+            y = row_frame.winfo_y()
+            canvas_h = self.msg_canvas.winfo_height()
+            target_y = max(0, y - canvas_h // 4)
+            fraction = target_y / float(total_h)
+            fraction = max(0.0, min(1.0, fraction))
+            self.msg_canvas.yview_moveto(fraction)
+        except Exception:
+            pass
 
     # ---------- UI Action Handlers ----------
 
@@ -3405,6 +3811,7 @@ class LANChatDialog:
                 self.btn_sound.config(text="🔕 Muted", bg="#7f1d1d")
             else:
                 self.btn_sound.config(text="🔔 Sound", bg="#334155")
+                play_sound_alert("message")
 
     def _prompt_add_colleague_ip(self):
         """Opens a modal to manually enter colleague's IP for isolated Wi-Fi."""
@@ -3466,6 +3873,11 @@ class LANChatDialog:
         if messagebox.askyesno("Clear Chat History", "Are you sure you want to clear your local chat history from SQLite?", parent=self.dialog):
             self.engine.clear_history()
             self.msg_widgets.clear()
+            self.reaction_containers.clear()
+            self.find_matches.clear()
+            self.find_index = -1
+            if hasattr(self, "find_bar") and self.find_bar.winfo_viewable():
+                self.lbl_find_count.config(text="0 matches", fg="#94a3b8")
             for widget in self.msg_inner.winfo_children():
                 widget.destroy()
 
@@ -3477,6 +3889,13 @@ class LANChatDialog:
         def _ui_remove():
             if target_msg_id in self.msg_widgets:
                 w = self.msg_widgets.pop(target_msg_id)
+                if w in self.find_matches:
+                    try:
+                        self.find_matches.remove(w)
+                    except ValueError:
+                        pass
+                    if hasattr(self, "find_bar") and self.find_bar.winfo_viewable() and hasattr(self, "entry_find") and self.entry_find.get().strip():
+                        self._run_find()
                 try:
                     w.destroy()
                 except Exception:
@@ -4224,10 +4643,15 @@ class LANChatDialog:
             w.destroy()
         self.msg_widgets.clear()
         self.reaction_containers.clear()
+        self.find_matches = []
+        self.find_index = -1
 
         for m in self.engine.messages:
             if self._message_matches_current_view(m):
                 self._render_message_bubble(m, scroll=False)
+
+        if hasattr(self, "find_bar") and self.find_bar.winfo_viewable() and hasattr(self, "entry_find") and self.entry_find.get().strip():
+            self._run_find()
 
         self.dialog.after(50, lambda: self.msg_canvas.yview_moveto(1.0))
 
@@ -4343,10 +4767,8 @@ class LANChatDialog:
             # Trigger notification sound and in-app toast if from peer
             if not msg_obj.get("is_me", False):
                 if not getattr(self, "sound_muted", False):
-                    try:
-                        self.dialog.bell()
-                    except Exception:
-                        pass
+                    alert_k = "mention" if msg_obj.get("mentioned_me") else "message"
+                    play_sound_alert(alert_k)
 
                 sender = msg_obj.get("user_name", "Colleague")
                 m_type = msg_obj.get("type", "chat")
@@ -4648,6 +5070,8 @@ class LANChatDialog:
 
         row_frame = tk.Frame(self.msg_inner, bg="#0f172a")
         row_frame.pack(fill=tk.X, padx=12, pady=5)
+        row_frame._msg_data = msg
+        row_frame._highlight_target = None
         self.msg_widgets[msg_id] = row_frame
 
         def _bind_context_menu(target_w):
@@ -4676,6 +5100,7 @@ class LANChatDialog:
             # ----------------- WORK UPDATE CARD -----------------
             card = tk.Frame(row_frame, bg="#1e293b", bd=1, relief="solid", padx=14, pady=12)
             card.pack(fill=tk.X, padx=8, pady=4)
+            row_frame._highlight_target = card
 
             c_header = tk.Frame(card, bg="#1e293b")
             c_header.pack(fill=tk.X, pady=(0, 8))
@@ -4798,6 +5223,7 @@ class LANChatDialog:
             # ----------------- TEAM POLL CARD -----------------
             card = tk.Frame(row_frame, bg="#1e293b", bd=1, relief="solid", padx=14, pady=12)
             card.pack(fill=tk.X, padx=8, pady=4)
+            row_frame._highlight_target = card
 
             c_header = tk.Frame(card, bg="#1e293b")
             c_header.pack(fill=tk.X, pady=(0, 8))
@@ -5036,6 +5462,7 @@ class LANChatDialog:
 
             card = tk.Frame(align_box, bg="#1e293b", bd=1, relief="solid", padx=14, pady=10)
             card.pack(anchor="e" if is_me else "w")
+            row_frame._highlight_target = card
 
             # Quoted reply preview if any
             if reply_to and isinstance(reply_to, dict) and reply_to.get("user_name"):
@@ -5197,30 +5624,121 @@ class LANChatDialog:
                             command=lambda p=target_p: show_in_file_manager(p)
                         ).pack(side=tk.LEFT, padx=3)
                 else:
-                    lbl_progress = tk.Label(
-                        btn_box,
-                        text="",
-                        font=font_spec(11, "bold"),
-                        fg="#38bdf8",
-                        bg="#1e293b"
+                    cancel_evt = threading.Event()
+                    active_hud = [None]
+
+                    ext = os.path.splitext(f_name)[1].lower()
+                    is_media = ext in (
+                        ".mp4", ".mkv", ".mov", ".avi", ".webm", ".flv", ".wmv", ".m4v", ".3gp", ".ts", ".ogv",
+                        ".mp3", ".wav", ".m4a", ".ogg", ".flac", ".aac", ".wma", ".opus"
                     )
+                    is_browser_doc = ext in (".pdf", ".html", ".htm", ".svg", ".txt")
+                    view_btn_text = "▶️ View" if is_media else "👁️ View"
 
-                    def _start_download(custom_path=None):
-                        btn_dl.config(state="disabled", text="⏳ Connecting...")
-                        btn_save_as.config(state="disabled")
-                        lbl_progress.pack(side=tk.LEFT, padx=(0, 8))
+                    def _start_download(custom_path=None, is_preview=False):
+                        btn_view.pack_forget()
+                        btn_dl.pack_forget()
+                        btn_save_as.pack_forget()
 
-                        def _on_prog(cur, tot):
+                        hud_frame = tk.Frame(card, bg="#0f172a", bd=1, relief="solid", padx=10, pady=8)
+                        hud_frame.pack(before=btn_box, fill=tk.X, pady=(4, 6))
+                        active_hud[0] = hud_frame
+
+                        top_stat = tk.Frame(hud_frame, bg="#0f172a")
+                        top_stat.pack(fill=tk.X)
+
+                        init_title = "👁️ Loading preview in memory..." if is_preview else "⏳ Connecting to peer..."
+                        lbl_status = tk.Label(top_stat, text=init_title, font=font_spec(10, "bold"), fg="#38bdf8", bg="#0f172a")
+                        lbl_status.pack(side=tk.LEFT)
+
+                        lbl_speed = tk.Label(top_stat, text="", font=font_spec(10), fg="#94a3b8", bg="#0f172a")
+                        lbl_speed.pack(side=tk.RIGHT)
+
+                        # Custom smooth fill progress bar
+                        prog_track = tk.Frame(hud_frame, bg="#334155", height=6)
+                        prog_track.pack(fill=tk.X, pady=(6, 4))
+                        prog_fill = tk.Frame(prog_track, bg="#2563eb", height=6, width=0)
+                        prog_fill.place(x=0, y=0, relheight=1.0, width=0)
+
+                        def _cancel_download():
+                            cancel_evt.set()
+                            if active_hud[0] and active_hud[0].winfo_exists():
+                                active_hud[0].destroy()
+                            if btn_cancel.winfo_exists():
+                                btn_cancel.destroy()
+                            btn_view.pack(side=tk.LEFT, padx=3)
+                            btn_dl.pack(side=tk.LEFT, padx=3)
+                            btn_save_as.pack(side=tk.LEFT, padx=3)
+                            btn_view.config(state="normal")
+                            btn_dl.config(state="normal")
+                            btn_save_as.config(state="normal")
+
+                        btn_cancel = tk.Button(
+                            btn_box,
+                            text="✕ Cancel",
+                            font=font_spec(10, "bold"),
+                            bg="#7f1d1d",
+                            fg="#fca5a5",
+                            activebackground="#991b1b",
+                            activeforeground="#ffffff",
+                            relief="flat",
+                            padx=12,
+                            pady=4,
+                            cursor="hand2",
+                            command=_cancel_download
+                        )
+                        btn_cancel.pack(side=tk.LEFT, padx=3)
+
+                        def _on_prog(cur, tot, spd=0.0, eta=0.0):
                             pct = int((cur / tot) * 100) if tot > 0 else 0
                             cur_str = format_file_size(cur)
                             tot_str = format_file_size(tot)
-                            self.dialog.after(0, lambda: lbl_progress.config(text=f"{pct}% ({cur_str}/{tot_str})"))
+                            spd_str = f"{format_file_size(spd)}/s" if spd > 0 else ""
+                            eta_str = f"ETA: {int(eta)}s" if eta > 0 else ""
+                            stat_sub = f"{spd_str}  {eta_str}".strip()
+
+                            def _ui_p():
+                                if not hud_frame.winfo_exists():
+                                    return
+                                prefix = "👁️ Preview:" if is_preview else "📥"
+                                lbl_status.config(text=f"{prefix} {pct}% • {cur_str} / {tot_str}")
+                                lbl_speed.config(text=stat_sub)
+                                trk_w = prog_track.winfo_width()
+                                if trk_w > 1 and tot > 0:
+                                    prog_fill.place_configure(width=max(2, int((cur / tot) * trk_w)))
+                            self.dialog.after(0, _ui_p)
 
                         def _on_finish(saved_path):
                             def _ui_done():
-                                lbl_progress.config(text="✅ Complete", fg="#10b981")
-                                btn_dl.destroy()
-                                btn_save_as.destroy()
+                                if active_hud[0] and active_hud[0].winfo_exists():
+                                    active_hud[0].destroy()
+                                if btn_cancel.winfo_exists():
+                                    btn_cancel.destroy()
+
+                                if not getattr(self, "sound_muted", False):
+                                    play_sound_alert("complete")
+
+                                if is_preview:
+                                    btn_view.pack(side=tk.LEFT, padx=3)
+                                    btn_dl.pack(side=tk.LEFT, padx=3)
+                                    btn_save_as.pack(side=tk.LEFT, padx=3)
+                                    btn_view.config(state="normal")
+                                    btn_dl.config(state="normal")
+                                    btn_save_as.config(state="normal")
+
+                                    open_file_externally(saved_path)
+                                    show_floating_toast(
+                                        self.dialog,
+                                        title="Preview Ready",
+                                        message=f"👁️ Opened '{f_name}' from temporary memory\n(No permanent disk space consumed)",
+                                        icon="👁️",
+                                        duration_ms=4000
+                                    )
+                                    return
+
+                                f_sz = os.path.getsize(saved_path) if os.path.exists(saved_path) else 0
+                                lbl_done = tk.Label(btn_box, text=f"✅ Saved ({format_file_size(f_sz)})", font=font_spec(10, "bold"), fg="#10b981", bg="#1e293b")
+                                lbl_done.pack(side=tk.LEFT, padx=(0, 6))
 
                                 # If image, attempt to load thumbnail right into card
                                 if is_image:
@@ -5264,10 +5782,18 @@ class LANChatDialog:
 
                         def _on_err(err_msg):
                             def _ui_err():
-                                lbl_progress.config(text="❌ Failed", fg="#ef4444")
-                                btn_dl.config(state="normal", text="⬇️ Download")
+                                if active_hud[0] and active_hud[0].winfo_exists():
+                                    active_hud[0].destroy()
+                                if btn_cancel.winfo_exists():
+                                    btn_cancel.destroy()
+                                btn_view.pack(side=tk.LEFT, padx=3)
+                                btn_dl.pack(side=tk.LEFT, padx=3)
+                                btn_save_as.pack(side=tk.LEFT, padx=3)
+                                btn_view.config(state="normal")
+                                btn_dl.config(state="normal")
                                 btn_save_as.config(state="normal")
-                                messagebox.showerror("Download Error", f"Could not download file:\n{err_msg}", parent=self.dialog)
+                                if "cancelled" not in err_msg.lower():
+                                    messagebox.showerror("Transfer Error", f"Could not load or download file:\n{err_msg}", parent=self.dialog)
                             self.dialog.after(0, _ui_err)
 
                         target_dir = SCREENSHOT_DIR if is_image else None
@@ -5277,8 +5803,96 @@ class LANChatDialog:
                             custom_save_path=custom_path,
                             on_progress=_on_prog,
                             on_done=_on_finish,
-                            on_error=_on_err
+                            on_error=_on_err,
+                            cancel_event=cancel_evt
                         )
+
+                    def _view_file():
+                        f_ip = msg.get("file_ip") or msg.get("sender_ip")
+                        f_port = msg.get("file_port")
+                        f_id = msg.get("file_id")
+                        if not f_ip or not f_port or not f_id:
+                            messagebox.showerror("View File", "Connection details missing for this peer file.", parent=self.dialog)
+                            return
+
+                        stream_url = f"http://{f_ip}:{f_port}/files/{f_id}/{urllib.parse.quote(f_name)}"
+
+                        # 1. Video & Audio files: Direct streaming (zero permanent disk space!)
+                        if is_media:
+                            opened_stream = False
+                            if sys.platform.startswith("linux"):
+                                media_players = ["showtime", "vlc", "mpv", "celluloid", "totem", "ffplay"]
+                                for player in media_players:
+                                    if shutil.which(player):
+                                        try:
+                                            subprocess.Popen([player, stream_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                            opened_stream = True
+                                            break
+                                        except Exception:
+                                            pass
+                            elif sys.platform == "darwin":
+                                try:
+                                    subprocess.Popen(["open", stream_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                                    opened_stream = True
+                                except Exception:
+                                    pass
+                            elif sys.platform == "win32":
+                                try:
+                                    os.startfile(stream_url)
+                                    opened_stream = True
+                                except Exception:
+                                    pass
+
+                            if not opened_stream:
+                                try:
+                                    webbrowser.open(stream_url)
+                                    opened_stream = True
+                                except Exception:
+                                    pass
+
+                            if opened_stream:
+                                show_floating_toast(
+                                    self.dialog,
+                                    title="Streaming Live Preview",
+                                    message=f"▶️ Streaming '{f_name}' directly across Wi-Fi\n(Zero disk space consumed)",
+                                    icon="▶️",
+                                    duration_ms=4000
+                                )
+                                return
+
+                        # 2. Browser viewable documents (PDF, HTML, SVG, TXT):
+                        if is_browser_doc:
+                            try:
+                                webbrowser.open(stream_url)
+                                show_floating_toast(
+                                    self.dialog,
+                                    title="Opening Live Preview",
+                                    message=f"👁️ Previewing '{f_name}' in browser\n(Zero disk space consumed)",
+                                    icon="👁️",
+                                    duration_ms=3500
+                                )
+                                return
+                            except Exception:
+                                pass
+
+                        # 3. All other file types (images, office documents, archives, code):
+                        # Preview via temporary RAM cache (/tmp/workpulse_preview/) - zero permanent disk storage!
+                        preview_dir = os.path.join(tempfile.gettempdir(), "workpulse_preview")
+                        os.makedirs(preview_dir, exist_ok=True)
+                        temp_preview_path = os.path.join(preview_dir, f_name)
+
+                        if os.path.exists(temp_preview_path) and os.path.getsize(temp_preview_path) > 0:
+                            open_file_externally(temp_preview_path)
+                            show_floating_toast(
+                                self.dialog,
+                                title="Temporary Preview",
+                                message=f"👁️ Opened '{f_name}' from temporary cache",
+                                icon="👁️",
+                                duration_ms=3000
+                            )
+                            return
+
+                        _start_download(custom_path=temp_preview_path, is_preview=True)
 
                     def _prompt_save_as():
                         chosen = choose_save_dialog(
@@ -5287,11 +5901,27 @@ class LANChatDialog:
                             default_name=f_name
                         )
                         if chosen:
-                            _start_download(custom_path=chosen)
+                            _start_download(custom_path=chosen, is_preview=False)
+
+                    btn_view = tk.Button(
+                        btn_box,
+                        text=view_btn_text,
+                        font=font_spec(11, "bold"),
+                        bg="#0284c7",
+                        fg="white",
+                        activebackground="#0369a1",
+                        activeforeground="white",
+                        relief="flat",
+                        padx=14,
+                        pady=5,
+                        cursor="hand2",
+                        command=_view_file
+                    )
+                    btn_view.pack(side=tk.LEFT, padx=3)
 
                     btn_dl = tk.Button(
                         btn_box,
-                        text="⬇️ View Image" if is_image else "⬇️ Download",
+                        text="⬇️ Download",
                         font=font_spec(11, "bold"),
                         bg="#059669",
                         fg="white",
@@ -5301,7 +5931,7 @@ class LANChatDialog:
                         padx=14,
                         pady=5,
                         cursor="hand2",
-                        command=lambda: _start_download()
+                        command=lambda: _start_download(is_preview=False)
                     )
                     btn_dl.pack(side=tk.LEFT, padx=3)
 
@@ -5338,6 +5968,7 @@ class LANChatDialog:
 
                 bubble = tk.Frame(align_box, bg="#2563eb", padx=14, pady=8)
                 bubble.pack(anchor="e")
+                row_frame._highlight_target = bubble
 
                 # Quoted reply preview if any
                 if reply_to and isinstance(reply_to, dict) and reply_to.get("user_name"):
@@ -5444,6 +6075,7 @@ class LANChatDialog:
                 bubble_bg = "#1e3a5f" if is_mentioned else "#334155"
                 bubble = tk.Frame(align_box, bg=bubble_bg, padx=14, pady=8, bd=1 if is_mentioned else 0, relief="solid")
                 bubble.pack(anchor="w")
+                row_frame._highlight_target = bubble
 
                 # Quoted reply preview if any
                 if reply_to and isinstance(reply_to, dict) and reply_to.get("user_name"):
@@ -5461,6 +6093,12 @@ class LANChatDialog:
                 self._render_reaction_pills(msg_id, msg.get("reactions") or {})
 
                 _bind_context_menu(bubble)
+
+        if not getattr(row_frame, "_highlight_target", None):
+            row_frame._highlight_target = row_frame
+
+        if hasattr(self, "find_bar") and self.find_bar.winfo_viewable() and hasattr(self, "entry_find") and self.entry_find.get().strip():
+            self._run_find()
 
         if scroll:
             self.dialog.update_idletasks()
