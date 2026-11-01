@@ -46,6 +46,7 @@ EOF
 # 2. Copy application source files
 cp "$DIR/app.py" "$PKG_DIR/opt/workpulse/"
 cp "$DIR/lan_chat.py" "$PKG_DIR/opt/workpulse/"
+cp "$DIR/reminder_scheduler.py" "$PKG_DIR/opt/workpulse/"
 cp "$DIR/requirements.txt" "$PKG_DIR/opt/workpulse/"
 cp "$DIR/settings.json" "$PKG_DIR/opt/workpulse/"
 cp -r "$DIR/assets" "$PKG_DIR/opt/workpulse/"
