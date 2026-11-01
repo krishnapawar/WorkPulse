@@ -35,7 +35,14 @@ if ! python3 -c "import buildozer" >/dev/null 2>&1; then
     pip install Cython buildozer
 fi
 
-# 4. Check Java (OpenJDK)
+# 4. Check & configure Java JDK (Gradle requires JDK 17 or 21)
+PORTABLE_JDK="${HOME}/.buildozer/android/platform/jdk-21/usr/lib/jvm/java-21-openjdk-amd64"
+if [ -d "$PORTABLE_JDK" ]; then
+    export JAVA_HOME="$PORTABLE_JDK"
+    export PATH="$JAVA_HOME/bin:$PATH"
+    echo "☕ Using configured Java 21 JDK: ${JAVA_HOME}"
+fi
+
 if ! command -v javac >/dev/null 2>&1; then
     echo ""
     echo "⚠️  Java JDK is required for Android build."
@@ -70,13 +77,24 @@ if ! command -v javac >/dev/null 2>&1; then
     fi
 fi
 
-# 4. Run Buildozer build
+# 5. Run Buildozer build
 echo ""
-echo "🚀 Running Buildozer (downloading Android SDK/NDK and compiling APK)..."
-echo "Note: The first build will take 10-15 minutes to download Android toolchains."
+echo "🚀 Running Buildozer (packaging APK)..."
 echo ""
 
-yes | buildozer android debug
+yes | buildozer android debug || {
+    echo "⚙️ Packaging with Gradle directly..."
+    cd "${DIR}/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/dists/workpulse" && ./gradlew assembleDebug
+    cd "${DIR}"
+}
+
+# Ensure APK is in dist/
+mkdir -p "${DIR}/dist"
+GRADLE_APK="${DIR}/.buildozer/android/platform/build-arm64-v8a_armeabi-v7a/dists/workpulse/build/outputs/apk/debug/workpulse-debug.apk"
+if [ -f "$GRADLE_APK" ]; then
+    cp "$GRADLE_APK" "${DIR}/dist/workpulse-1.0.0-debug.apk"
+    cp "$GRADLE_APK" "${DIR}/dist/workpulse.apk"
+fi
 
 echo ""
 echo "=========================================================="

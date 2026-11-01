@@ -689,6 +689,10 @@ def show_in_app_toast(master, title, message, icon="💬", on_click=None, durati
         return None
 
 
+# Backward-compatible alias for in-app floating notifications
+show_floating_toast = show_in_app_toast
+
+
 def play_sound_alert(alert_type="message"):
     """
     Plays an audible chime for incoming messages, mentions, or file completions.
@@ -5727,7 +5731,7 @@ class LANChatDialog:
                                     btn_save_as.config(state="normal")
 
                                     open_file_externally(saved_path)
-                                    show_floating_toast(
+                                    show_in_app_toast(
                                         self.dialog,
                                         title="Preview Ready",
                                         message=f"👁️ Opened '{f_name}' from temporary memory\n(No permanent disk space consumed)",
@@ -5851,7 +5855,7 @@ class LANChatDialog:
                                     pass
 
                             if opened_stream:
-                                show_floating_toast(
+                                show_in_app_toast(
                                     self.dialog,
                                     title="Streaming Live Preview",
                                     message=f"▶️ Streaming '{f_name}' directly across Wi-Fi\n(Zero disk space consumed)",
@@ -5864,7 +5868,7 @@ class LANChatDialog:
                         if is_browser_doc:
                             try:
                                 webbrowser.open(stream_url)
-                                show_floating_toast(
+                                show_in_app_toast(
                                     self.dialog,
                                     title="Opening Live Preview",
                                     message=f"👁️ Previewing '{f_name}' in browser\n(Zero disk space consumed)",
@@ -5883,7 +5887,7 @@ class LANChatDialog:
 
                         if os.path.exists(temp_preview_path) and os.path.getsize(temp_preview_path) > 0:
                             open_file_externally(temp_preview_path)
-                            show_floating_toast(
+                            show_in_app_toast(
                                 self.dialog,
                                 title="Temporary Preview",
                                 message=f"👁️ Opened '{f_name}' from temporary cache",
