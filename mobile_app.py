@@ -49,6 +49,13 @@ except (ImportError, Exception):
     def get_color_from_hex(hex_str):  # type: ignore
         return (1, 1, 1, 1)
 
+try:
+    from storage_config import is_android, get_storage_path, acquire_android_multicast_lock
+except Exception:
+    def is_android(): return False
+    def get_storage_path(fn): return fn
+    def acquire_android_multicast_lock(): return None
+
 # Import backend business logic
 try:
     from app import (
@@ -57,7 +64,7 @@ try:
         get_daily_timings, save_daily_timings,
         format_date_only, FILE, sync_google_sheet_month,
         fetch_google_sheet_month, save_fetched_rows_to_excel,
-        fetch_and_load_month_data
+        fetch_and_load_month_data, init_file
     )
 except Exception as e:
     print(f"Warning: app.py import: {e}")
@@ -444,7 +451,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="Connecting to LAN...",
             font_size='12sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.55,
+            size_hint_x=0.38,
             halign='left',
             valign='middle'
         )
@@ -455,7 +462,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="Share Tasks",
             font_size='12sp',
             bold=True,
-            size_hint_x=0.25,
+            size_hint_x=0.24,
             background_normal='',
             background_color=get_color_from_hex("#8b5cf6"),
             color=(1, 1, 1, 1)
@@ -467,13 +474,25 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="+ IP",
             font_size='12sp',
             bold=True,
-            size_hint_x=0.20,
+            size_hint_x=0.18,
             background_normal='',
             background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
         )
         btn_add_ip.bind(on_release=self.open_custom_ip_popup)
         chat_top.add_widget(btn_add_ip)
+
+        btn_rescan = Button(
+            text="Rescan",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.20,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        btn_rescan.bind(on_release=self.rescan_lan_network)
+        chat_top.add_widget(btn_rescan)
 
         container.add_widget(chat_top)
 
@@ -518,6 +537,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
     def init_lan_chat_engine(self):
         if not LANChatEngine:
+            if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
+                self.lbl_chat_status.text = "LAN Chat unavailable"
             return
 
         user_name = self.settings.get("user_name", "Mobile User")
@@ -531,6 +552,18 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self._update_network_status_labels()
         except Exception as e:
             print(f"Error starting LAN Chat Engine on mobile: {e}")
+            if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
+                self.lbl_chat_status.text = f"LAN Init Error: {e}"
+
+    def rescan_lan_network(self, *args):
+        if self.chat_engine:
+            try:
+                self.chat_engine.stop()
+            except Exception:
+                pass
+            self.chat_engine = None
+        self.init_lan_chat_engine()
+        self.show_popup("Network Refreshed", "Rescanned local Wi-Fi interfaces and sent discovery beacon.")
 
     def _on_lan_message_received(self, msg_dict):
         if KIVY_AVAILABLE and Clock:
@@ -550,6 +583,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
     def _update_network_status_labels(self):
         if not self.chat_engine:
+            if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
+                self.lbl_chat_status.text = "Offline"
             return
         ip = self.chat_engine.local_ip
         peer_cnt = len(self.chat_engine.peers)
@@ -557,7 +592,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
             self.lbl_chat_status.text = txt
         if hasattr(self, 'lbl_net_chip') and self.lbl_net_chip:
-            self.lbl_net_chip.text = f"{peer_cnt} Online" if peer_cnt > 0 else "Ready"
+            self.lbl_net_chip.text = f"{peer_cnt} Online" if peer_cnt > 0 else f"{ip}"
 
     def refresh_chat_messages_ui(self):
         if not self.chat_engine:
@@ -627,7 +662,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if not text:
             return
         if self.chat_engine:
-            self.chat_engine.send_broadcast_message(text)
+            if hasattr(self.chat_engine, "send_chat_message"):
+                self.chat_engine.send_chat_message(text)
+            elif hasattr(self.chat_engine, "send_broadcast_message"):
+                self.chat_engine.send_broadcast_message(text)
             self.in_chat_msg.text = ""
             self.refresh_chat_messages_ui()
             Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
@@ -660,7 +698,18 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 "project": "WorkPulse"
             })
 
-        self.chat_engine.send_work_update(date_v, tasks)
+        shift_str = ""
+        if hasattr(self, 'in_login') and hasattr(self, 'in_logout'):
+            shift_str = f"{self.in_login.text.strip()} - {self.in_logout.text.strip()}"
+        total_h = f"{hours_v}h" if hours_v else "8.0h"
+
+        self.chat_engine.send_work_update(
+            title_or_date=title_v or "Daily Standup Progress",
+            date_str_or_tasks=date_v,
+            tasks=tasks,
+            shift_str=shift_str,
+            total_hours=total_h
+        )
         self.refresh_chat_messages_ui()
         Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
         self.show_popup("Shared", "Today's work progress shared with LAN team!")
@@ -854,10 +903,15 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             return
 
         if 'add_custom_reminder' in globals():
-            add_custom_reminder(title, date_v, time_v, repeat=repeat)
-            self.in_rem_title.text = ""
-            self.refresh_reminders_list()
-            self.show_popup("Scheduled", f"Reminder '{title}' scheduled successfully!")
+            try:
+                add_custom_reminder(title, date_v, time_v, repeat=repeat)
+                self.in_rem_title.text = ""
+                self.refresh_reminders_list()
+                self.show_popup("Scheduled", f"Reminder '{title}' scheduled for {date_v} {time_v}!")
+            except Exception as e:
+                self.show_popup("Error", f"Failed to save reminder: {e}")
+        else:
+            self.show_popup("Error", "Schedule engine is not loaded.")
 
     def toggle_daily_alerts(self, *args):
         if 'load_all_settings' in globals() and 'save_all_settings' in globals():
@@ -961,12 +1015,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         try:
             if 'save_work_update' in globals():
-                save_work_update(
+                ok = save_work_update(
                     date_v, proj_v, title_v, desc_v, hours_v, status_v, "",
                     login_time=login_v, logout_time=logout_v
                 )
-                self.show_popup("Success", f"Task saved to {FILE}!")
-                self.clear_form()
+                if ok is not False:
+                    fname = os.path.basename(FILE) if 'FILE' in globals() else "data.xlsx"
+                    self.show_popup("Success", f"Task saved to {fname}!")
+                    self.clear_form()
+                else:
+                    self.show_popup("Error", "Could not save task update. Please verify storage.")
 
                 # Background Google Sheet auto-sync if configured
                 settings = load_settings() if 'load_settings' in globals() else {}
@@ -978,7 +1036,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                         m_name = datetime.datetime.now().strftime("%B %Y")
                     threading.Thread(target=lambda: sync_google_sheet_month(m_name), daemon=True).start()
             else:
-                self.show_popup("Saved", "Task update recorded!")
+                self.show_popup("Error", "Work update engine is not loaded.")
         except Exception as e:
             self.show_popup("Error", f"Failed to save: {e}")
 
@@ -1066,7 +1124,28 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         popup.open()
 
     def on_start(self):
-        # Auto-fetch Google Sheet on startup if configured
+        # 1. Initialize local Excel database file
+        if 'init_file' in globals():
+            try:
+                init_file()
+            except Exception as e:
+                print(f"init_file note: {e}")
+
+        # 2. Request Android runtime permissions on Android
+        if is_android():
+            try:
+                from android.permissions import request_permissions, Permission
+                request_permissions([
+                    Permission.INTERNET,
+                    Permission.ACCESS_NETWORK_STATE,
+                    Permission.ACCESS_WIFI_STATE,
+                    Permission.CHANGE_WIFI_MULTICAST_STATE,
+                    Permission.POST_NOTIFICATIONS,
+                ])
+            except Exception as e:
+                print(f"Notice: Android permissions: {e}")
+
+        # 3. Auto-fetch Google Sheet on startup if configured
         settings = load_settings() if 'load_settings' in globals() else {}
         if settings.get("gsheet_fetch_priority", True) and settings.get("gsheet_webapp_url"):
             month_name = datetime.datetime.now().strftime("%B %Y")

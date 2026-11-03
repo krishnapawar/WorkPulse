@@ -14,6 +14,24 @@ import calendar
 import threading
 import subprocess
 try:
+    from storage_config import get_storage_path, is_android, DummyMessageBox, show_android_notification
+except Exception:
+    def get_storage_path(fn): return fn
+    def is_android(): return False
+    def show_android_notification(t, m): return False
+    class DummyMessageBox:
+        @staticmethod
+        def showerror(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def showinfo(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def showwarning(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def askyesno(title="", message="", **kwargs): return True
+        @staticmethod
+        def askokcancel(title="", message="", **kwargs): return True
+
+try:
     import tkinter as tk
     from tkinter import ttk, messagebox
     TK_AVAILABLE = True
@@ -29,7 +47,7 @@ except (ImportError, Exception):
         class Button: pass
     tk = DummyTk()
     ttk = None
-    messagebox = None
+    messagebox = DummyMessageBox()
     TK_AVAILABLE = False
 
 # ---------------------------------------------------------------------------
@@ -74,8 +92,7 @@ DEFAULT_REMINDER_SETTINGS = {
 }
 
 def get_settings_file_path():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
-    return os.path.join(base_dir, "settings.json")
+    return get_storage_path("settings.json")
 
 
 def load_all_settings():
@@ -201,6 +218,9 @@ def deliver_desktop_notification(title, message, app_name="WorkPulse"):
     """
     def _worker():
         try:
+            if is_android():
+                show_android_notification(title, message)
+                return
             if sys.platform.startswith("linux"):
                 subprocess.run(
                     ["notify-send", "-a", app_name, "-i", "alarm", "-t", "6000", str(title), str(message)],

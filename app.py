@@ -1,4 +1,28 @@
 try:
+    from storage_config import get_storage_path, is_android, DummyMessageBox, DummyFileDialog
+except Exception:
+    def get_storage_path(fn): return fn
+    def is_android(): return False
+    class DummyMessageBox:
+        @staticmethod
+        def showerror(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def showinfo(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def showwarning(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def askyesno(title="", message="", **kwargs): return True
+        @staticmethod
+        def askokcancel(title="", message="", **kwargs): return True
+    class DummyFileDialog:
+        @staticmethod
+        def askopenfilename(**kwargs): return ""
+        @staticmethod
+        def asksaveasfilename(**kwargs): return ""
+        @staticmethod
+        def askdirectory(**kwargs): return ""
+
+try:
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
     import tkinter.font as tkfont
@@ -15,8 +39,8 @@ except (ImportError, Exception):
         class Button: pass
     tk = DummyTk()
     ttk = None
-    messagebox = None
-    filedialog = None
+    messagebox = DummyMessageBox()
+    filedialog = DummyFileDialog()
     tkfont = None
     TK_AVAILABLE = False
 import os
@@ -103,8 +127,8 @@ def center_window(window, parent=None, default_w=None, default_h=None, min_w=Non
 
     window.geometry(f"{int(w)}x{int(h)}+{int(x)}+{int(y)}")
 
-FILE = "data.xlsx"
-SETTINGS_FILE = "settings.json"
+FILE = get_storage_path("data.xlsx")
+SETTINGS_FILE = get_storage_path("settings.json")
 
 HEADERS = [
     "ID",

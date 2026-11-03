@@ -22,7 +22,12 @@ import uuid
 import socket
 import select
 import math
-import sqlite3
+try:
+    import sqlite3
+    SQLITE_AVAILABLE = True
+except (ImportError, Exception):
+    sqlite3 = None
+    SQLITE_AVAILABLE = False
 import datetime
 import threading
 import collections
@@ -32,6 +37,37 @@ import urllib.parse
 import http.server
 import re
 import html
+try:
+    from storage_config import (
+        is_android, get_storage_path, acquire_android_multicast_lock,
+        release_android_multicast_lock, get_android_network_info,
+        show_android_notification, DummyMessageBox, DummyFileDialog
+    )
+except Exception:
+    def is_android(): return False
+    def get_storage_path(fn): return fn
+    def acquire_android_multicast_lock(): return None
+    def release_android_multicast_lock(): pass
+    def get_android_network_info(): return None, []
+    def show_android_notification(t, m): return False
+    class DummyMessageBox:
+        @staticmethod
+        def showerror(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def showinfo(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def showwarning(title="", message="", **kwargs): print(f"[{title}] {message}")
+        @staticmethod
+        def askyesno(title="", message="", **kwargs): return True
+        @staticmethod
+        def askokcancel(title="", message="", **kwargs): return True
+    class DummyFileDialog:
+        @staticmethod
+        def askopenfilename(**kwargs): return ""
+        @staticmethod
+        def asksaveasfilename(**kwargs): return ""
+        @staticmethod
+        def askdirectory(**kwargs): return ""
 try:
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
@@ -49,8 +85,8 @@ except (ImportError, Exception):
         class Button: pass
     tk = DummyTk()
     ttk = None
-    messagebox = None
-    filedialog = None
+    messagebox = DummyMessageBox()
+    filedialog = DummyFileDialog()
     tkfont = None
     TK_AVAILABLE = False
 import shutil
@@ -60,8 +96,8 @@ import mimetypes
 
 # Default port for WorkPulse LAN Chat
 DEFAULT_LAN_PORT = 45454
-CHAT_DB_FILE = "chat_history.db"
-LEGACY_JSON_FILE = "chat_history.json"
+CHAT_DB_FILE = get_storage_path("chat_history.db")
+LEGACY_JSON_FILE = get_storage_path("chat_history.json")
 MAX_HISTORY_ITEMS = 500
 BEACON_INTERVAL = 3.0  # seconds between heartbeat broadcasts
 PEER_TIMEOUT = 10.0    # seconds before marking peer as offline
@@ -581,6 +617,9 @@ def show_desktop_notification(title, message, app_name="WorkPulse"):
     """
     def _worker():
         try:
+            if is_android():
+                show_android_notification(title, message)
+                return
             if sys.platform.startswith("linux"):
                 subprocess.run(
                     ["notify-send", "-a", app_name, "-i", "mail-message-new", "-t", "5000", str(title), str(message)],
@@ -719,6 +758,9 @@ def play_sound_alert(alert_type="message"):
     """
     def _worker():
         try:
+            if is_android():
+                show_android_notification(title, message)
+                return
             if sys.platform.startswith("linux"):
                 sound_map = {
                     "mention": [
@@ -896,29 +938,58 @@ def center_window(window, parent=None, default_w=None, default_h=None, min_w=Non
 def get_network_info():
     """
     Detects primary local IP and broadcast addresses for LAN communication.
-    Works reliably across Linux, Windows, and macOS.
+    Works reliably across Android, Linux, Windows, and macOS.
     """
     local_ip = "127.0.0.1"
     hostname = socket.gethostname()
-    broadcasts = {"255.255.255.255", "<broadcast>"}
+    broadcasts = {"255.255.255.255"}
 
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        local_ip = s.getsockname()[0]
-        s.close()
-    except Exception:
+    # 1. Android Wi-Fi network interface detection
+    if is_android():
         try:
-            local_ip = socket.gethostbyname(hostname)
+            a_ip, a_bcasts = get_android_network_info()
+            if a_ip:
+                local_ip = a_ip
+                for b in a_bcasts:
+                    broadcasts.add(b)
         except Exception:
-            local_ip = "127.0.0.1"
+            pass
 
+    # 2. Standard socket route probing (tries public DNS then local gateways if offline)
+    if local_ip == "127.0.0.1":
+        for target_host in ("8.8.8.8", "192.168.1.1", "192.168.0.1", "10.0.0.1"):
+            try:
+                s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                s.connect((target_host, 80))
+                ip_cand = s.getsockname()[0]
+                s.close()
+                if ip_cand and not ip_cand.startswith("127."):
+                    local_ip = ip_cand
+                    break
+            except Exception:
+                continue
+
+    if local_ip == "127.0.0.1":
+        try:
+            ip_cand = socket.gethostbyname(hostname)
+            if ip_cand and not ip_cand.startswith("127."):
+                local_ip = ip_cand
+        except Exception:
+            pass
+
+    # 3. Subnet broadcast address calculation
     parts = local_ip.split(".")
     if len(parts) == 4 and parts[0] != "127":
-        subnet_bcast = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
-        broadcasts.add(subnet_bcast)
+        subnet_bcast_24 = f"{parts[0]}.{parts[1]}.{parts[2]}.255"
+        subnet_bcast_16 = f"{parts[0]}.{parts[1]}.255.255"
+        broadcasts.add(subnet_bcast_24)
+        broadcasts.add(subnet_bcast_16)
 
-    return local_ip, hostname, list(broadcasts)
+    # Note: avoid '<broadcast>' on Android/Linux to prevent socket.gaierror
+    if not is_android() and sys.platform != "linux":
+        broadcasts.add("<broadcast>")
+
+    return local_ip, hostname, [b for b in broadcasts if b]
 
 
 # ==============================================================================
@@ -934,7 +1005,37 @@ class ChatDatabase:
     def __init__(self, db_path=CHAT_DB_FILE):
         self.db_path = db_path
         self.lock = threading.Lock()
-        self._init_db()
+        self.use_sqlite = bool(SQLITE_AVAILABLE and sqlite3 is not None)
+        self._json_fallback_file = LEGACY_JSON_FILE
+        self._fallback_messages = []
+        self._fallback_pinned = None
+
+        if self.use_sqlite:
+            try:
+                self._init_db()
+            except Exception as e:
+                print(f"Notice: SQLite init failed ({e}), using JSON fallback for LAN chat.")
+                self.use_sqlite = False
+                self._load_fallback_json()
+        else:
+            self._load_fallback_json()
+
+    def _load_fallback_json(self):
+        if os.path.exists(self._json_fallback_file):
+            try:
+                with open(self._json_fallback_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                    if isinstance(data, list):
+                        self._fallback_messages = data
+            except Exception:
+                self._fallback_messages = []
+
+    def _save_fallback_json(self):
+        try:
+            with open(self._json_fallback_file, "w", encoding="utf-8") as f:
+                json.dump(self._fallback_messages[-MAX_HISTORY_ITEMS:], f, indent=2)
+        except Exception as e:
+            print(f"Error saving chat JSON fallback: {e}")
 
     def _get_connection(self):
         conn = sqlite3.connect(self.db_path, timeout=10.0, check_same_thread=False)
@@ -1079,8 +1180,17 @@ class ChatDatabase:
         ))
 
     def save_message(self, msg_dict):
-        """Persists a message dictionary into SQLite."""
+        """Persists a message dictionary into SQLite or JSON fallback."""
         with self.lock:
+            if not self.use_sqlite:
+                m_id = msg_dict.get("id")
+                idx = next((i for i, m in enumerate(self._fallback_messages) if m.get("id") == m_id), None)
+                if idx is not None:
+                    self._fallback_messages[idx] = msg_dict
+                else:
+                    self._fallback_messages.append(msg_dict)
+                self._save_fallback_json()
+                return True
             try:
                 with self._get_connection() as conn:
                     self._insert_row(conn, msg_dict)
@@ -1093,6 +1203,13 @@ class ChatDatabase:
     def update_local_path(self, msg_id, local_path):
         """Updates local_path in database once a shared file finishes downloading."""
         with self.lock:
+            if not self.use_sqlite:
+                for m in self._fallback_messages:
+                    if m.get("id") == msg_id:
+                        m["local_path"] = local_path
+                        break
+                self._save_fallback_json()
+                return True
             try:
                 with self._get_connection() as conn:
                     conn.execute("UPDATE chat_messages SET local_path = ? WHERE id = ?", (local_path, msg_id))
@@ -1105,6 +1222,13 @@ class ChatDatabase:
     def update_reactions(self, msg_id, reactions):
         """Updates reactions_json in SQLite database for msg_id."""
         with self.lock:
+            if not self.use_sqlite:
+                for m in self._fallback_messages:
+                    if m.get("id") == msg_id:
+                        m["reactions"] = reactions
+                        break
+                self._save_fallback_json()
+                return True
             try:
                 reactions_json = json.dumps(reactions) if reactions else ""
                 with self._get_connection() as conn:
@@ -1118,6 +1242,13 @@ class ChatDatabase:
     def update_is_pinned(self, msg_id, is_pinned):
         """Updates is_pinned status for a message."""
         with self.lock:
+            if not self.use_sqlite:
+                for m in self._fallback_messages:
+                    if m.get("id") == msg_id:
+                        m["is_pinned"] = is_pinned
+                        break
+                self._save_fallback_json()
+                return True
             try:
                 with self._get_connection() as conn:
                     conn.execute("UPDATE chat_messages SET is_pinned = ? WHERE id = ?", (1 if is_pinned else 0, msg_id))
@@ -1130,6 +1261,13 @@ class ChatDatabase:
     def update_poll_data(self, msg_id, options_list):
         """Updates tasks_json in SQLite for a poll message."""
         with self.lock:
+            if not self.use_sqlite:
+                for m in self._fallback_messages:
+                    if m.get("id") == msg_id:
+                        m["tasks"] = options_list
+                        break
+                self._save_fallback_json()
+                return True
             try:
                 tasks_json = json.dumps(options_list)
                 with self._get_connection() as conn:
@@ -1141,8 +1279,10 @@ class ChatDatabase:
                 return False
 
     def load_pinned_announcement(self):
-        """Loads latest pinned announcement from SQLite if exists."""
+        """Loads latest pinned announcement from SQLite or fallback."""
         with self.lock:
+            if not self.use_sqlite:
+                return self._fallback_pinned
             try:
                 with self._get_connection() as conn:
                     cursor = conn.execute("SELECT id, msg_id, text, user_name, pinned_by, timestamp FROM pinned_announcements ORDER BY timestamp DESC LIMIT 1")
@@ -1161,8 +1301,11 @@ class ChatDatabase:
         return None
 
     def save_pinned_announcement(self, pin_obj):
-        """Saves a pinned announcement to SQLite."""
+        """Saves a pinned announcement to SQLite or fallback."""
         with self.lock:
+            if not self.use_sqlite:
+                self._fallback_pinned = pin_obj
+                return True
             try:
                 with self._get_connection() as conn:
                     conn.execute("DELETE FROM pinned_announcements;")
@@ -1184,8 +1327,11 @@ class ChatDatabase:
                 return False
 
     def clear_pinned_announcements(self):
-        """Clears all pinned announcements from SQLite."""
+        """Clears all pinned announcements from SQLite or fallback."""
         with self.lock:
+            if not self.use_sqlite:
+                self._fallback_pinned = None
+                return True
             try:
                 with self._get_connection() as conn:
                     conn.execute("DELETE FROM pinned_announcements;")
@@ -1196,8 +1342,12 @@ class ChatDatabase:
                 return False
 
     def delete_message(self, msg_id):
-        """Deletes a single message by ID from SQLite database."""
+        """Deletes a single message by ID from SQLite database or fallback."""
         with self.lock:
+            if not self.use_sqlite:
+                self._fallback_messages = [m for m in self._fallback_messages if m.get("id") != msg_id]
+                self._save_fallback_json()
+                return True
             try:
                 with self._get_connection() as conn:
                     conn.execute("DELETE FROM chat_messages WHERE id = ?", (msg_id,))
@@ -1210,6 +1360,8 @@ class ChatDatabase:
     def load_recent_messages(self, limit=MAX_HISTORY_ITEMS):
         """Loads last N messages from SQLite in chronological order."""
         with self.lock:
+            if not self.use_sqlite:
+                return list(self._fallback_messages[-limit:])
             try:
                 with self._get_connection() as conn:
                     cursor = conn.execute("""
@@ -1283,7 +1435,12 @@ class ChatDatabase:
                 return []
 
     def search_messages(self, query_str, limit=50):
-        """Searches message texts, user names, or file names in SQLite."""
+        """Searches message texts, user names, or file names in SQLite or JSON fallback."""
+        if not self.use_sqlite:
+            q = query_str.lower().strip()
+            with self.lock:
+                res = [m for m in reversed(self._fallback_messages) if q in str(m.get("text", "")).lower() or q in str(m.get("user_name", "")).lower() or q in str(m.get("title", "")).lower() or q in str(m.get("file_name", "")).lower()]
+                return res[:limit]
         q = f"%{query_str.strip()}%"
         with self.lock:
             try:
@@ -1359,8 +1516,10 @@ class ChatDatabase:
                 return []
 
     def get_message_count(self):
-        """Returns total message count stored in SQLite."""
+        """Returns total message count stored in SQLite or fallback."""
         with self.lock:
+            if not self.use_sqlite:
+                return len(self._fallback_messages)
             try:
                 with self._get_connection() as conn:
                     cursor = conn.execute("SELECT COUNT(*) FROM chat_messages")
@@ -1370,8 +1529,12 @@ class ChatDatabase:
                 return 0
 
     def clear_all(self):
-        """Deletes all messages from SQLite database."""
+        """Deletes all messages from SQLite database or fallback."""
         with self.lock:
+            if not self.use_sqlite:
+                self._fallback_messages.clear()
+                self._save_fallback_json()
+                return True
             try:
                 with self._get_connection() as conn:
                     conn.execute("DELETE FROM chat_messages;")
@@ -1449,6 +1612,9 @@ class LANChatEngine:
             return
         self.running = True
 
+        # Acquire Wi-Fi Multicast Lock on Android
+        acquire_android_multicast_lock()
+
         # Refresh network info
         self.local_ip, self.hostname, self.broadcast_addrs = get_network_info()
 
@@ -1458,6 +1624,10 @@ class LANChatEngine:
         # 2. Create receiving UDP socket
         self.rx_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        try:
+            self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        except (AttributeError, OSError):
+            pass
         try:
             self.rx_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEPORT, 1)
         except (AttributeError, OSError):
@@ -1625,6 +1795,11 @@ class LANChatEngine:
                 self.tx_sock.close()
             except Exception:
                 pass
+
+        try:
+            release_android_multicast_lock()
+        except Exception:
+            pass
 
     def update_profile(self, user_name, status=None, status_emoji=None, status_note=None):
         """Updates user profile and broadcasts state change to peers."""
@@ -2074,8 +2249,21 @@ class LANChatEngine:
 
         threading.Thread(target=_worker, daemon=True, name="LANChat-FileDownload").start()
 
-    def send_work_update(self, title, date_str, tasks, shift_str, total_hours):
+    def send_broadcast_message(self, text, **kwargs):
+        """Sends a broadcast chat message to all peers (mobile compatibility alias)."""
+        return self.send_chat_message(text, **kwargs)
+
+    def send_work_update(self, title_or_date, date_str_or_tasks=None, tasks=None, shift_str="", total_hours=""):
         """Sends a structured Work Update card to the team."""
+        # Handle flexible call signatures: (date_str, tasks) or (title, date_str, tasks, shift, hours)
+        if tasks is None and isinstance(date_str_or_tasks, list):
+            date_str = str(title_or_date)
+            tasks = date_str_or_tasks
+            title = "Daily Work Update"
+        else:
+            title = str(title_or_date or "Daily Work Update")
+            date_str = str(date_str_or_tasks or datetime.date.today().strftime("%Y-%m-%d"))
+            tasks = tasks or []
         now = datetime.datetime.now()
         time_str = now.strftime("%I:%M %p")
         pkt_id = uuid.uuid4().hex[:12]

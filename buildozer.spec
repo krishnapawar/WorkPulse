@@ -22,7 +22,7 @@ version = 1.0.0
 
 # (list) Application requirements
 # comma separated e.g. requirements = sqlite3,kivy
-requirements = python3,kivy,openpyxl,requests,urllib3,et_xmlfile
+requirements = python3,kivy,sqlite3,openpyxl,requests,urllib3,et_xmlfile,pyjnius
 
 # (str) Presplash of the application
 #presplash.filename = %(source.dir)s/assets/icon_512.png
@@ -37,7 +37,7 @@ orientation = portrait
 fullscreen = 0
 
 # (list) Permissions
-android.permissions = INTERNET,ACCESS_NETWORK_STATE,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE
+android.permissions = INTERNET,ACCESS_NETWORK_STATE,ACCESS_WIFI_STATE,CHANGE_WIFI_MULTICAST_STATE,CHANGE_WIFI_STATE,READ_EXTERNAL_STORAGE,WRITE_EXTERNAL_STORAGE,POST_NOTIFICATIONS
 
 # (int) Target Android API, should be as high as possible.
 android.api = 34

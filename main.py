@@ -8,13 +8,21 @@ Automatically detects environment:
 import sys
 import os
 
-def is_android():
-    return (
-        'ANDROID_BOOTLOGO' in os.environ or 
-        'ANDROID_ROOT' in os.environ or 
-        'ANDROID_STORAGE' in os.environ or
-        sys.platform.startswith('android')
-    )
+try:
+    from storage_config import is_android
+except Exception:
+    def is_android():
+        return (
+            'ANDROID_BOOTLOGO' in os.environ or 
+            'ANDROID_ROOT' in os.environ or 
+            'ANDROID_STORAGE' in os.environ or
+            'ANDROID_ARGUMENT' in os.environ or
+            'ANDROID_PRIVATE' in os.environ or
+            'ANDROID_APP_PATH' in os.environ or
+            'PYTHON_SERVICE_ARGUMENT' in os.environ or
+            'P4A_BOOTSTRAP' in os.environ or
+            sys.platform.startswith('android')
+        )
 
 def main():
     if is_android():
