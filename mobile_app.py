@@ -28,6 +28,7 @@ try:
     from kivy.uix.spinner import Spinner  # type: ignore
     from kivy.uix.popup import Popup  # type: ignore
     from kivy.uix.filechooser import FileChooserListView  # type: ignore
+    from kivy.uix.image import Image  # type: ignore
     from kivy.clock import Clock  # type: ignore
     from kivy.metrics import dp, sp  # type: ignore
     try:
@@ -40,7 +41,7 @@ try:
 except (ImportError, Exception):
     KIVY_AVAILABLE = False
     App = object
-    BoxLayout = GridLayout = ScrollView = Label = TextInput = Button = Spinner = Popup = Window = Clock = object
+    BoxLayout = GridLayout = ScrollView = Label = TextInput = Button = Spinner = Popup = Window = Clock = Image = object
     Clipboard = None
 
     def dp(x):  # type: ignore
@@ -113,7 +114,8 @@ except Exception as e:
 
 try:
     from lan_chat import (
-        LANChatEngine, get_network_info, get_avatar_color, get_initials, format_file_size
+        LANChatEngine, get_network_info, get_avatar_color, get_initials, format_file_size,
+        get_file_icon, is_image_file
     )
 except Exception as e:
     print(f"Warning: lan_chat import: {e}")
@@ -122,6 +124,8 @@ except Exception as e:
     get_avatar_color = None
     get_initials = None
     def format_file_size(b): return f"{b} B"
+    def get_file_icon(fn): return "📁"
+    def is_image_file(fn): return False
 
 
 class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
@@ -147,6 +151,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.unread_chat_count = 0
         self.rendered_msg_ids = set()
         self.current_tab = "work"
+        self.downloaded_files = {}  # Cache of local files: {file_id: local_file_path}
 
         # Main Root Container
         root = BoxLayout(orientation='vertical', padding=0, spacing=0)
@@ -1495,23 +1500,161 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             body_color = "#e2e8f0"
             use_markup = True
         elif msg_type == "file":
-            fn = safe_escape_markup(msg.get("file_name", "file"))
-            fs = safe_escape_markup(msg.get("file_size_str", ""))
-            body_text = f"[b]Shared File:[/b] {fn} ({fs})"
-            body_color = "#93c5fd"
-            use_markup = True
-            if not is_me:
-                btn_action = Button(
-                    text=f"⬇ Download ({msg.get('file_size_str', '')})",
+            fn = msg.get("file_name", "Shared File")
+            fn_safe = safe_escape_markup(fn)
+            fs_str = safe_escape_markup(msg.get("file_size_str") or format_file_size(msg.get("file_size", 0)))
+            f_icon = get_file_icon(fn) if 'get_file_icon' in globals() else "📁"
+            caption = safe_escape_markup(msg.get("caption", "").strip())
+            file_id = msg.get("file_id", "")
+            is_image = msg.get("is_image", False) or (is_image_file(fn) if 'is_image_file' in globals() else False)
+
+            local_p = self.get_file_local_path(msg)
+            has_local = bool(local_p and os.path.isfile(local_p))
+
+            # Desktop-style File Card widget container
+            card = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(6), padding=[dp(10), dp(8), dp(10), dp(8)])
+
+            # Row 1: File Emoji Icon + File Name & Metadata
+            top_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+            lbl_icon = Label(
+                text=f_icon,
+                font_size='24sp',
+                size_hint_x=None,
+                width=dp(38),
+                halign='center',
+                valign='middle'
+            )
+            top_box.add_widget(lbl_icon)
+
+            info_col = BoxLayout(orientation='vertical', size_hint_x=1, spacing=dp(2))
+            lbl_name = Label(
+                text=f"[b]{fn_safe}[/b]",
+                markup=True,
+                font_size='13sp',
+                color=get_color_from_hex("#f8fafc"),
+                size_hint_y=None,
+                height=dp(22),
+                halign='left',
+                valign='middle',
+                shorten=True,
+                shorten_from='right'
+            )
+            lbl_name.bind(size=lbl_name.setter('text_size'))
+            info_col.add_widget(lbl_name)
+
+            sub_txt = f"{fs_str} • Shared by you" if is_me else f"{fs_str} • LAN Transfer"
+            if has_local:
+                sub_txt = f"[color=#10b981]✅ Saved[/color]  [color=#94a3b8]{fs_str}[/color]"
+            lbl_meta = Label(
+                text=sub_txt,
+                markup=True,
+                font_size='11sp',
+                color=get_color_from_hex("#94a3b8"),
+                size_hint_y=None,
+                height=dp(18),
+                halign='left',
+                valign='middle'
+            )
+            lbl_meta.bind(size=lbl_meta.setter('text_size'))
+            info_col.add_widget(lbl_meta)
+            top_box.add_widget(info_col)
+            card.add_widget(top_box)
+
+            # Optional Caption
+            if caption:
+                lbl_cap = Label(
+                    text=f"[i]{caption}[/i]",
+                    markup=True,
                     font_size='12sp',
-                    bold=True,
+                    color=get_color_from_hex("#cbd5e1"),
                     size_hint_y=None,
-                    height=dp(34),
+                    height=dp(20),
+                    halign='left',
+                    valign='middle'
+                )
+                lbl_cap.bind(size=lbl_cap.setter('text_size'))
+                card.add_widget(lbl_cap)
+
+            # Local Image Preview if already downloaded
+            if is_image and has_local and Image is not None and Image is not object:
+                try:
+                    img_w = Image(source=local_p, size_hint_y=None, height=dp(150), allow_stretch=True, keep_ratio=True)
+                    card.add_widget(img_w)
+                except Exception:
+                    pass
+
+            # Buttons Row
+            btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(8))
+            
+            if has_local:
+                # File exists locally: show "📂 Open / View File" button
+                btn_open = Button(
+                    text="📂 Open / View File",
+                    font_size='13sp',
+                    bold=True,
+                    size_hint_x=1,
                     background_normal='',
                     background_color=get_color_from_hex("#0284c7"),
                     color=(1, 1, 1, 1)
                 )
-                btn_action.bind(on_release=lambda x, m=msg: self.download_chat_file(m))
+                btn_open.bind(on_release=lambda x, p=local_p: self.open_file_externally(p))
+                btn_row.add_widget(btn_open)
+            else:
+                # File not downloaded yet: show BOTH "👁️ View" AND "⬇ Download" buttons
+                ext_l = os.path.splitext(fn)[1].lower()
+                is_media = ext_l in ('.mp4', '.mkv', '.avi', '.mov', '.3gp', '.mp3', '.wav', '.m4a', '.ogg', '.flac')
+                view_txt = "▶️ Play" if is_media else "👁️ View"
+
+                btn_view = Button(
+                    text=view_txt,
+                    font_size='12sp',
+                    bold=True,
+                    size_hint_x=0.48,
+                    background_normal='',
+                    background_color=get_color_from_hex("#8b5cf6"),
+                    color=(1, 1, 1, 1)
+                )
+                btn_dl = Button(
+                    text="⬇ Download",
+                    font_size='12sp',
+                    bold=True,
+                    size_hint_x=0.52,
+                    background_normal='',
+                    background_color=get_color_from_hex("#059669"),
+                    color=(1, 1, 1, 1)
+                )
+
+                def _start_view(btn_inst, m=msg, r=btn_row, meta=lbl_meta):
+                    btn_view.disabled = True
+                    btn_dl.disabled = True
+                    btn_view.text = "⏳ Loading..."
+                    self.download_and_handle_file(m, is_preview=True, on_complete_open=True, btn_row=r, meta_lbl=meta)
+
+                def _start_download(btn_inst, m=msg, r=btn_row, meta=lbl_meta):
+                    btn_view.disabled = True
+                    btn_dl.disabled = True
+                    btn_dl.text = "⏳ Downloading..."
+                    self.download_and_handle_file(m, is_preview=False, on_complete_open=False, btn_row=r, meta_lbl=meta)
+
+                btn_view.bind(on_release=_start_view)
+                btn_dl.bind(on_release=_start_download)
+                btn_row.add_widget(btn_view)
+                btn_row.add_widget(btn_dl)
+
+            card.add_widget(btn_row)
+
+            # Compute Card & Bubble Height
+            c_height = dp(44) + dp(38) + dp(14)
+            if caption:
+                c_height += dp(22)
+            if is_image and has_local and Image is not None and Image is not object:
+                c_height += dp(156)
+            card.height = c_height
+
+            bubble.add_widget(card)
+            bubble.height = dp(24) + c_height + dp(8)
+            self.chat_list_layout.add_widget(bubble)
+            return
         else:
             body_text = msg.get("text", "")
             body_color = "#ffffff"
@@ -1677,15 +1820,18 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             print(f"Error copying uri to cache: {e}")
         return None
 
-    def _send_picked_file(self, file_path):
+    def _send_picked_file(self, file_path, caption=""):
         if not file_path or not os.path.isfile(file_path):
             self.show_popup("Error", "Selected file could not be read.")
             return
         if self.chat_engine:
             try:
-                msg_obj = self.chat_engine.send_file(file_path)
+                msg_obj = self.chat_engine.send_file(file_path, caption=caption)
                 if msg_obj:
                     fn = os.path.basename(file_path)
+                    f_id = msg_obj.get("file_id")
+                    if f_id:
+                        self.downloaded_files[f_id] = file_path
                     self.show_popup("File Shared", f"File '{fn}' broadcast to LAN team!")
                     Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
                 else:
@@ -1837,11 +1983,27 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     sz_str = format_file_size(os.path.getsize(target))
                 except Exception:
                     sz_str = ""
-                lbl_selected.text = f"Selected: [b]{safe_escape_markup(fn)}[/b] ({sz_str})"
-                btn_send.text = f"Send '{fn[:18]}...'" if len(fn) > 18 else f"Send '{fn}'"
+                f_ic = get_file_icon(fn) if 'get_file_icon' in globals() else "📁"
+                lbl_selected.text = f"{f_ic} Selected: [b]{safe_escape_markup(fn)}[/b] ({sz_str})"
+                btn_send.text = f"Send {f_ic} '{fn[:16]}...'" if len(fn) > 16 else f"Send {f_ic} '{fn}'"
                 btn_send.background_color = get_color_from_hex("#10b981")
 
         filechooser.bind(selection=_on_selection_change)
+
+        # Optional Caption Input
+        in_caption = TextInput(
+            hint_text="Optional caption / message with file...",
+            multiline=False,
+            font_size='12sp',
+            size_hint_y=None,
+            height=dp(36),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            hint_text_color=get_color_from_hex("#64748b"),
+            padding=[dp(8), dp(8)]
+        )
+        content.add_widget(in_caption)
 
         def _do_send_file(x):
             sel = filechooser.selection
@@ -1849,8 +2011,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 self.show_popup("Notice", "Please tap on a file to select it before sending.")
                 return
             chosen_file = sel[0]
+            cap_text = in_caption.text.strip()
             popup.dismiss()
-            self._send_picked_file(chosen_file)
+            self._send_picked_file(chosen_file, caption=cap_text)
 
         btn_send = Button(
             text="Send File",
@@ -1904,28 +2067,223 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         except Exception:
             return get_storage_path("downloads")
 
-    def download_chat_file(self, msg):
+    def get_preview_cache_dir(self):
+        if is_android():
+            try:
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                cache_dir = PythonActivity.mActivity.getCacheDir().getAbsolutePath()
+                if cache_dir and os.path.isdir(cache_dir):
+                    return cache_dir
+            except Exception:
+                pass
+        p = os.path.join(get_storage_dir(), "cache")
+        try:
+            os.makedirs(p, exist_ok=True)
+            return p
+        except Exception:
+            return self.get_best_download_dir()
+
+    def get_file_local_path(self, msg):
+        """Finds if a shared file exists locally on this phone/device."""
+        # 1. Direct saved_path on msg
+        p = msg.get("saved_path")
+        if p and os.path.isfile(p):
+            return p
+        # 2. Sender's local_path (if sent by this device)
+        p = msg.get("local_path")
+        if p and os.path.isfile(p):
+            return p
+        # 3. downloaded_files dictionary
+        fid = msg.get("file_id")
+        if fid and hasattr(self, 'downloaded_files') and fid in self.downloaded_files:
+            p = self.downloaded_files[fid]
+            if p and os.path.isfile(p):
+                return p
+        # 4. Check best download dir (e.g. /sdcard/Download)
+        fn = msg.get("file_name")
+        if fn:
+            dl_p = os.path.join(self.get_best_download_dir(), fn)
+            if os.path.isfile(dl_p):
+                return dl_p
+            # 5. Check preview cache dir
+            c_p = os.path.join(self.get_preview_cache_dir(), fn)
+            if os.path.isfile(c_p):
+                return c_p
+        return None
+
+    def open_file_externally(self, filepath):
+        """Opens any file in its default external viewer on Android or Desktop."""
+        if not filepath or not os.path.isfile(filepath):
+            self.show_popup("Notice", "File not found on this device.")
+            return False
+
+        if is_android():
+            try:
+                from jnius import autoclass, cast
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                activity = PythonActivity.mActivity
+                Intent = autoclass('android.content.Intent')
+                Uri = autoclass('android.net.Uri')
+                File = autoclass('java.io.File')
+                String = autoclass('java.lang.String')
+
+                # Disable StrictMode death on file exposure so all apps can read the file
+                try:
+                    StrictMode = autoclass('android.os.StrictMode')
+                    VmPolicyBuilder = autoclass('android.os.StrictMode$VmPolicy$Builder')
+                    StrictMode.setVmPolicy(VmPolicyBuilder().build())
+                except Exception:
+                    pass
+
+                file_obj = File(filepath)
+                uri = Uri.fromFile(file_obj)
+
+                import mimetypes
+                mime_type, _ = mimetypes.guess_type(filepath)
+                if not mime_type:
+                    ext = os.path.splitext(filepath)[1].lower()
+                    mime_map = {
+                        '.apk': 'application/vnd.android.package-archive',
+                        '.pdf': 'application/pdf',
+                        '.jpg': 'image/jpeg',
+                        '.jpeg': 'image/jpeg',
+                        '.png': 'image/png',
+                        '.webp': 'image/webp',
+                        '.gif': 'image/gif',
+                        '.mp4': 'video/mp4',
+                        '.mkv': 'video/x-matroska',
+                        '.mov': 'video/quicktime',
+                        '.avi': 'video/x-msvideo',
+                        '.3gp': 'video/3gpp',
+                        '.mp3': 'audio/mpeg',
+                        '.wav': 'audio/wav',
+                        '.m4a': 'audio/mp4',
+                        '.ogg': 'audio/ogg',
+                        '.opus': 'audio/opus',
+                        '.doc': 'application/msword',
+                        '.docx': 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+                        '.xls': 'application/vnd.ms-excel',
+                        '.xlsx': 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+                        '.ppt': 'application/vnd.ms-powerpoint',
+                        '.pptx': 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+                        '.txt': 'text/plain',
+                        '.csv': 'text/csv',
+                        '.json': 'application/json',
+                        '.zip': 'application/zip',
+                        '.rar': 'application/x-rar-compressed',
+                        '.7z': 'application/x-7z-compressed',
+                    }
+                    mime_type = mime_map.get(ext, '*/*')
+
+                intent = Intent(Intent.ACTION_VIEW)
+                intent.setDataAndType(uri, mime_type)
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+                try:
+                    title_cs = cast('java.lang.CharSequence', String(f"Open '{os.path.basename(filepath)}' with"))
+                    chooser = Intent.createChooser(intent, title_cs)
+                    chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                    activity.startActivity(chooser)
+                except Exception:
+                    activity.startActivity(intent)
+                return True
+            except Exception as e:
+                print(f"Android open_file error: {e}")
+                self.show_popup("Notice", f"Could not open file viewer: {e}")
+                return False
+        else:
+            # Desktop Linux / Mac / Windows
+            try:
+                import subprocess
+                if sys.platform.startswith('linux'):
+                    subprocess.Popen(['xdg-open', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                elif sys.platform == 'darwin':
+                    subprocess.Popen(['open', filepath], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                    return True
+                elif sys.platform == 'win32':
+                    os.startfile(filepath)
+                    return True
+            except Exception as e:
+                print(f"Desktop open error: {e}")
+                self.show_popup("Notice", f"Could not open file: {e}")
+            return False
+
+    def download_and_handle_file(self, msg, is_preview=False, on_complete_open=False, btn_row=None, meta_lbl=None):
         if not self.chat_engine:
             self.show_popup("Notice", "LAN Chat engine is not active.")
             return
 
         file_name = msg.get("file_name", "downloaded_file")
-        target_dir = self.get_best_download_dir()
+        file_id = msg.get("file_id", "")
+        target_dir = self.get_preview_cache_dir() if is_preview else self.get_best_download_dir()
 
-        self.show_popup("Downloading", f"Downloading '{file_name}' from peer...")
+        def _on_progress(cur, tot, spd=0.0, eta=0.0):
+            pct = int((cur / tot) * 100) if tot > 0 else 0
+            cur_s = format_file_size(cur)
+            def _update_ui(dt):
+                if btn_row and len(btn_row.children) > 0:
+                    prefix = "👁️" if is_preview else "📥"
+                    btn = btn_row.children[0] if not is_preview else btn_row.children[-1]
+                    btn.text = f"{prefix} {pct}% ({cur_s})"
+            Clock.schedule_once(_update_ui, 0)
 
         def _on_done(saved_path):
-            Clock.schedule_once(lambda dt: self.show_popup("Download Complete", f"File saved successfully!\nLocation:\n{saved_path}"), 0)
+            def _finish_ui(dt):
+                if file_id:
+                    self.downloaded_files[file_id] = saved_path
+                msg["saved_path"] = saved_path
+                msg["local_path"] = saved_path
+
+                if meta_lbl:
+                    f_sz = os.path.getsize(saved_path) if os.path.isfile(saved_path) else msg.get("file_size", 0)
+                    meta_lbl.text = f"[color=#10b981]✅ Saved[/color]  [color=#94a3b8]{format_file_size(f_sz)}[/color]"
+
+                if btn_row:
+                    btn_row.clear_widgets()
+                    btn_open = Button(
+                        text="📂 Open / View File",
+                        font_size='13sp',
+                        bold=True,
+                        size_hint_x=1,
+                        background_normal='',
+                        background_color=get_color_from_hex("#0284c7"),
+                        color=(1, 1, 1, 1)
+                    )
+                    btn_open.bind(on_release=lambda x, p=saved_path: self.open_file_externally(p))
+                    btn_row.add_widget(btn_open)
+
+                if on_complete_open:
+                    self.open_file_externally(saved_path)
+                else:
+                    self.show_popup("Download Complete", f"File saved successfully!\n\n'{file_name}'\n\nLocation:\n{saved_path}")
+
+            Clock.schedule_once(_finish_ui, 0)
 
         def _on_err(err_msg):
-            Clock.schedule_once(lambda dt: self.show_popup("Download Failed", f"Could not download '{file_name}':\n{err_msg}"), 0)
+            def _err_ui(dt):
+                if btn_row:
+                    for child in btn_row.children:
+                        child.disabled = False
+                        if "view" in child.text.lower() or "play" in child.text.lower():
+                            child.text = "👁️ View"
+                        else:
+                            child.text = "⬇ Download"
+                self.show_popup("Download Failed", f"Could not load '{file_name}':\n{err_msg}")
+            Clock.schedule_once(_err_ui, 0)
 
         self.chat_engine.download_file(
             msg,
             target_dir=target_dir,
+            on_progress=_on_progress,
             on_done=_on_done,
             on_error=_on_err
         )
+
+    def download_chat_file(self, msg):
+        self.download_and_handle_file(msg, is_preview=False, on_complete_open=False)
 
     def share_today_tasks_to_chat(self, *args):
         if not self.chat_engine:
