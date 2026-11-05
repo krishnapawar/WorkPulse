@@ -7,6 +7,7 @@ full LAN Team Chat integration, Daily Work Manager, and Reminder Scheduler.
 import os
 import sys
 import datetime
+import time
 import json
 import threading
 import uuid
@@ -1557,44 +1558,59 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             return
 
         if is_android():
-            # Launch Android native file chooser (picks files, images, downloads, docs seamlessly)
-            try:
-                from jnius import autoclass
-                from android.activity import bind as android_activity_bind
-                PythonActivity = autoclass('org.kivy.android.PythonActivity')
-                Intent = autoclass('android.content.Intent')
-
-                REQ_CODE = 9021
-
-                def _activity_callback(request_code, result_code, intent):
-                    if request_code == REQ_CODE:
-                        try:
-                            android_activity_bind(on_activity_result=None)
-                        except Exception:
-                            pass
-                        if intent is not None and result_code == -1:  # RESULT_OK == -1
-                            uri = intent.getData()
-                            if uri is not None:
-                                local_path = self._copy_android_uri_to_cache(uri)
-                                if local_path and os.path.isfile(local_path):
-                                    Clock.schedule_once(lambda dt: self._send_picked_file(local_path), 0)
-
-                android_activity_bind(on_activity_result=_activity_callback)
-
-                intent = Intent(Intent.ACTION_GET_CONTENT)
-                intent.setType("*/*")
-                intent.addCategory(Intent.CATEGORY_OPENABLE)
-                chooser = Intent.createChooser(intent, "Select File to Share")
-                PythonActivity.mActivity.startActivityForResult(chooser, REQ_CODE)
+            launched = self.launch_android_native_picker()
+            if launched:
                 return
-            except Exception as e:
-                print(f"Android native file chooser note: {e}")
 
-        # Fallback for desktop or if native intent fails
+        # Fallback for desktop or if native picker could not launch
         self._open_in_app_file_chooser()
+
+    def launch_android_native_picker(self):
+        try:
+            from jnius import autoclass, cast
+            from android.activity import bind as android_activity_bind, unbind as android_activity_unbind
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            Intent = autoclass('android.content.Intent')
+            String = autoclass('java.lang.String')
+
+            REQ_CODE = 9021
+
+            def _on_activity_result(req_code, res_code, intent_data):
+                if req_code == REQ_CODE:
+                    try:
+                        android_activity_unbind(on_activity_result=_on_activity_result)
+                    except Exception:
+                        pass
+                    if intent_data is not None and res_code == -1:  # Activity.RESULT_OK == -1
+                        uri = intent_data.getData()
+                        if uri is not None:
+                            local_path = self._copy_android_uri_to_cache(uri)
+                            if local_path and os.path.isfile(local_path):
+                                Clock.schedule_once(lambda dt: self._send_picked_file(local_path), 0)
+
+            self._picker_result_callback = _on_activity_result
+            android_activity_bind(on_activity_result=_on_activity_result)
+
+            intent = Intent(Intent.ACTION_GET_CONTENT)
+            intent.setType("*/*")
+            intent.addCategory(Intent.CATEGORY_OPENABLE)
+
+            activity = PythonActivity.mActivity
+            try:
+                title_cs = cast('java.lang.CharSequence', String("Select File to Share"))
+                chooser = Intent.createChooser(intent, title_cs)
+                activity.startActivityForResult(chooser, REQ_CODE)
+            except Exception:
+                activity.startActivityForResult(intent, REQ_CODE)
+            return True
+        except Exception as e:
+            print(f"Android native file chooser note: {e}")
+            return False
 
     def _copy_android_uri_to_cache(self, uri):
         try:
+            import mimetypes
+            import shutil
             from jnius import autoclass
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
             activity = PythonActivity.mActivity
@@ -1613,27 +1629,53 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 print(f"Query filename error: {e}")
 
             if not filename:
-                filename = f"shared_{int(time.time())}"
+                ext = ""
+                try:
+                    mime = cr.getType(uri)
+                    if mime:
+                        ext = mimetypes.guess_extension(mime) or ""
+                except Exception:
+                    pass
+                filename = f"shared_{int(time.time())}{ext}"
 
             cache_dir = activity.getCacheDir().getAbsolutePath()
             dest_path = os.path.join(cache_dir, filename)
 
-            in_stream = cr.openInputStream(uri)
-            if in_stream is None:
-                return None
+            # High-performance POSIX file descriptor stream copy
+            copied = False
+            try:
+                pfd = cr.openFileDescriptor(uri, "r")
+                if pfd is not None:
+                    fd = pfd.getFd()
+                    with open(fd, "rb", closefd=False) as f_in:
+                        with open(dest_path, "wb") as f_out:
+                            shutil.copyfileobj(f_in, f_out)
+                    pfd.close()
+                    copied = True
+            except Exception as e_pfd:
+                print(f"ParcelFileDescriptor copy note: {e_pfd}")
 
-            with open(dest_path, "wb") as f_out:
-                buf = bytearray(65536)
-                while True:
-                    n = in_stream.read(buf)
-                    if n <= 0:
-                        break
-                    f_out.write(buf[:n])
-            in_stream.close()
-            return dest_path
+            # Java stream fallback via FileUtils
+            if not copied:
+                try:
+                    FileUtils = autoclass('android.os.FileUtils')
+                    File = autoclass('java.io.File')
+                    FileOutputStream = autoclass('java.io.FileOutputStream')
+                    in_stream = cr.openInputStream(uri)
+                    if in_stream is not None:
+                        out_stream = FileOutputStream(File(dest_path))
+                        FileUtils.copy(in_stream, out_stream)
+                        out_stream.close()
+                        in_stream.close()
+                        copied = True
+                except Exception as e_fu:
+                    print(f"FileUtils stream copy note: {e_fu}")
+
+            if copied and os.path.isfile(dest_path) and os.path.getsize(dest_path) > 0:
+                return dest_path
         except Exception as e:
             print(f"Error copying uri to cache: {e}")
-            return None
+        return None
 
     def _send_picked_file(self, file_path):
         if not file_path or not os.path.isfile(file_path):
@@ -1653,46 +1695,96 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
     def _open_in_app_file_chooser(self):
         # Quick directory resolver
-        start_dir = os.path.expanduser("~")
+        start_dir = "/sdcard/Download" if (is_android() and os.path.isdir("/sdcard/Download")) else os.path.expanduser("~")
         for d in ("/sdcard/Download", "/storage/emulated/0/Download", os.path.expanduser("~/Downloads"), "/sdcard"):
             if os.path.isdir(d):
                 start_dir = d
                 break
 
         content = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
-        lbl_info = Label(
-            text="[b]Select File to Share on LAN[/b]",
-            markup=True,
-            font_size='14sp',
-            size_hint_y=None,
-            height=dp(26),
-            color=get_color_from_hex("#38bdf8")
+
+        # Top Button: Launch Android Native System Picker
+        if is_android():
+            btn_system_picker = Button(
+                text="📱 Open System Files / Gallery (Photos, Docs, Downloads)",
+                font_size='12sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(42),
+                background_normal='',
+                background_color=get_color_from_hex("#0284c7"),
+                color=(1, 1, 1, 1)
+            )
+            content.add_widget(btn_system_picker)
+
+        # Directory Path Bar & Up Navigation Button
+        path_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(6))
+        btn_up = Button(
+            text="⬆️ Up",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.22,
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
         )
-        content.add_widget(lbl_info)
+        path_bar.add_widget(btn_up)
+
+        lbl_path = Label(
+            text=f"📁 {start_dir}",
+            font_size='11sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_x=0.78,
+            halign='left',
+            valign='middle',
+            shorten=True,
+            shorten_from='left'
+        )
+        lbl_path.bind(size=lbl_path.setter('text_size'))
+        path_bar.add_widget(lbl_path)
+        content.add_widget(path_bar)
+
+        # Quick Navigation Shortcuts
+        nav_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(4))
+        shortcuts = [
+            ("Downloads", "/sdcard/Download" if is_android() else os.path.expanduser("~/Downloads")),
+            ("Storage", "/sdcard" if is_android() else os.path.expanduser("~")),
+            ("Photos", "/sdcard/DCIM" if is_android() else os.path.expanduser("~/Pictures")),
+            ("Docs", "/sdcard/Documents" if is_android() else os.path.expanduser("~/Documents"))
+        ]
 
         filechooser = FileChooserListView(
             path=start_dir,
             size_hint=(1, 1)
         )
 
-        nav_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(4))
-        shortcuts = [
-            ("Downloads", "/sdcard/Download" if is_android() else os.path.expanduser("~/Downloads")),
-            ("Storage", "/sdcard" if is_android() else os.path.expanduser("~")),
-            ("Home", os.path.expanduser("~"))
-        ]
         for name, p in shortcuts:
             if os.path.isdir(p):
-                b = Button(text=name, font_size='11sp', background_normal='', background_color=get_color_from_hex("#334155"))
-                b.bind(on_release=lambda x, target=p: setattr(filechooser, 'path', target))
+                b = Button(
+                    text=name,
+                    font_size='11sp',
+                    background_normal='',
+                    background_color=get_color_from_hex("#334155"),
+                    color=(1, 1, 1, 1)
+                )
+                def _do_nav(btn_inst, target_path=p):
+                    filechooser.path = target_path
+                    filechooser.selection = []
+                    lbl_path.text = f"📁 {target_path}"
+                    lbl_selected.text = "Tap a folder to open, or tap a file to select."
+                    btn_send.text = "Send File"
+                    btn_send.background_color = get_color_from_hex("#059669")
+                b.bind(on_release=_do_nav)
                 nav_row.add_widget(b)
         content.add_widget(nav_row)
 
         content.add_widget(filechooser)
 
+        # Status / Selected item indicator
         lbl_selected = Label(
-            text="Tap a file to select",
-            font_size='12sp',
+            text="💡 Tap any folder (e.g. resumes) to open. Tap a file to select.",
+            markup=True,
+            font_size='11sp',
             size_hint_y=None,
             height=dp(24),
             color=get_color_from_hex("#94a3b8"),
@@ -1702,19 +1794,59 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         lbl_selected.bind(size=lbl_selected.setter('text_size'))
         content.add_widget(lbl_selected)
 
+        # Bottom Buttons
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(title="Share File with Team", content=content, size_hint=(0.96, 0.88))
+
+        if is_android():
+            def _on_system_picker_click(x):
+                popup.dismiss()
+                self.launch_android_native_picker()
+            btn_system_picker.bind(on_release=_on_system_picker_click)
+
+        def _go_up_dir(x):
+            cur = os.path.abspath(filechooser.path)
+            parent = os.path.dirname(cur)
+            if parent and parent != cur and os.path.isdir(parent):
+                filechooser.path = parent
+                filechooser.selection = []
+                lbl_path.text = f"📁 {parent}"
+                lbl_selected.text = "Tap a folder to open, or tap a file to select."
+                btn_send.text = "Send File"
+                btn_send.background_color = get_color_from_hex("#059669")
+
+        btn_up.bind(on_release=_go_up_dir)
+
+        # SINGLE TAP TO ENTER DIRECTORY OR SELECT FILE
         def _on_selection_change(chooser, selection):
-            if selection:
-                lbl_selected.text = f"Selected: {os.path.basename(selection[0])}"
+            if not selection:
+                return
+            target = selection[0]
+            if os.path.isdir(target):
+                # Tapped on directory (like 'resumes', 'statement', etc.): OPEN IT IMMEDIATELY!
+                if chooser.path != target:
+                    chooser.path = target
+                    chooser.selection = []
+                    lbl_path.text = f"📁 {target}"
+                    lbl_selected.text = f"Inside: [b]{os.path.basename(target)}[/b]. Tap a file to select."
+                    btn_send.text = "Send File"
+                    btn_send.background_color = get_color_from_hex("#059669")
+            elif os.path.isfile(target):
+                fn = os.path.basename(target)
+                try:
+                    sz_str = format_file_size(os.path.getsize(target))
+                except Exception:
+                    sz_str = ""
+                lbl_selected.text = f"Selected: [b]{safe_escape_markup(fn)}[/b] ({sz_str})"
+                btn_send.text = f"Send '{fn[:18]}...'" if len(fn) > 18 else f"Send '{fn}'"
+                btn_send.background_color = get_color_from_hex("#10b981")
 
         filechooser.bind(selection=_on_selection_change)
-
-        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="Share File with Team", content=content, size_hint=(0.94, 0.82))
 
         def _do_send_file(x):
             sel = filechooser.selection
             if not sel or not os.path.isfile(sel[0]):
-                self.show_popup("Notice", "Please select a file to send.")
+                self.show_popup("Notice", "Please tap on a file to select it before sending.")
                 return
             chosen_file = sel[0]
             popup.dismiss()
@@ -1722,6 +1854,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         btn_send = Button(
             text="Send File",
+            font_size='13sp',
             background_normal='',
             background_color=get_color_from_hex("#059669"),
             bold=True
@@ -1730,6 +1863,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         btn_cancel = Button(
             text="Cancel",
+            font_size='13sp',
             background_normal='',
             background_color=get_color_from_hex("#475569")
         )
