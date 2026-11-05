@@ -1745,8 +1745,13 @@ class LANChatEngine:
                 if not is_head:
                     self.wfile.write(b"File not found or transfer completed.")
 
+        import socketserver
+        class ThreadedFileServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
+            daemon_threads = True
+            allow_reuse_address = True
+
         try:
-            self.file_server = http.server.HTTPServer(("0.0.0.0", 0), LANFileHTTPHandler)
+            self.file_server = ThreadedFileServer(("0.0.0.0", 0), LANFileHTTPHandler)
             self.file_server_port = self.file_server.server_port
             self.file_server_thread = threading.Thread(
                 target=self.file_server.serve_forever,
@@ -2177,7 +2182,16 @@ class LANChatEngine:
                     dest = custom_save_path
                 else:
                     base_dir = target_dir or os.path.expanduser("~/Downloads/WorkPulse_Files")
-                    os.makedirs(base_dir, exist_ok=True)
+                    try:
+                        os.makedirs(base_dir, exist_ok=True)
+                    except Exception:
+                        try:
+                            from storage_config import get_storage_dir
+                            base_dir = os.path.join(get_storage_dir(), "downloads")
+                        except Exception:
+                            base_dir = os.path.join(os.path.expanduser("~"), "downloads")
+                        os.makedirs(base_dir, exist_ok=True)
+
                     dest = os.path.join(base_dir, f_name)
                     base, ext = os.path.splitext(f_name)
                     idx = 1
@@ -2186,12 +2200,25 @@ class LANChatEngine:
                         idx += 1
 
                 url = f"http://{f_ip}:{f_port}/files/{f_id}"
-                req = urllib.request.Request(url)
+                req = urllib.request.Request(url, headers={"User-Agent": "WorkPulse-LAN/1.0"})
                 with urllib.request.urlopen(req, timeout=45) as resp:
                     total_bytes = int(resp.headers.get("Content-Length", 0))
                     read_bytes = 0
-                    os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
-                    tmp_dest = dest + ".wp_part"
+                    try:
+                        os.makedirs(os.path.dirname(os.path.abspath(dest)), exist_ok=True)
+                        tmp_dest = dest + ".wp_part"
+                        test_handle = open(tmp_dest, "wb")
+                        test_handle.close()
+                    except (PermissionError, OSError):
+                        try:
+                            from storage_config import get_storage_dir
+                            alt_dir = os.path.join(get_storage_dir(), "downloads")
+                        except Exception:
+                            alt_dir = os.path.join(os.path.expanduser("~"), "downloads")
+                        os.makedirs(alt_dir, exist_ok=True)
+                        dest = os.path.join(alt_dir, f_name)
+                        tmp_dest = dest + ".wp_part"
+
                     t_start = time.time()
                     last_calc_t = t_start
                     last_calc_b = 0

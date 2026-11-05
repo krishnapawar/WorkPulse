@@ -9,6 +9,7 @@ import sys
 import datetime
 import json
 import threading
+import uuid
 
 # Ensure local dir is in path
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -63,6 +64,28 @@ except Exception:
     def get_storage_path(fn): return fn
     def acquire_android_multicast_lock(): return None
     def show_android_notification(t, m): return False
+
+NOTES_FILE = get_storage_path("notes.json")
+
+def load_notes():
+    if os.path.exists(NOTES_FILE):
+        try:
+            with open(NOTES_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+                if isinstance(data, list):
+                    return data
+        except Exception as e:
+            print(f"Error loading notes: {e}")
+    return []
+
+def save_notes(notes):
+    try:
+        with open(NOTES_FILE, "w", encoding="utf-8") as f:
+            json.dump(notes, f, indent=2, ensure_ascii=False)
+        return True
+    except Exception as e:
+        print(f"Error saving notes: {e}")
+        return False
 
 # Import backend business logic
 try:
@@ -128,14 +151,14 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         root = BoxLayout(orientation='vertical', padding=0, spacing=0)
 
         # 1. Top Header App Bar
-        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(50), padding=[dp(12), dp(4), dp(12), dp(4)], spacing=dp(8))
+        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(50), padding=[dp(10), dp(4), dp(10), dp(4)], spacing=dp(6))
         
         lbl_app = Label(
             text="[b]WorkPulse[/b] [color=#38bdf8]Mobile[/color]",
             markup=True,
             font_size='18sp',
             color=get_color_from_hex("#f8fafc"),
-            size_hint_x=0.6,
+            size_hint_x=0.52,
             halign='left',
             valign='middle'
         )
@@ -144,22 +167,33 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         self.lbl_net_chip = Label(
             text="Online",
-            font_size='12sp',
+            font_size='11sp',
             color=get_color_from_hex("#34d399"),
-            size_hint_x=0.4,
+            size_hint_x=0.34,
             halign='right',
             valign='middle'
         )
         self.lbl_net_chip.bind(size=self.lbl_net_chip.setter('text_size'))
         header.add_widget(self.lbl_net_chip)
+
+        btn_settings = Button(
+            text="⚙️",
+            font_size='17sp',
+            size_hint_x=0.14,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_settings.bind(on_release=self.open_settings_popup)
+        header.add_widget(btn_settings)
         root.add_widget(header)
 
-        # 2. Modern 4-Tab Navigation Bar
-        nav_tabs = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), padding=[dp(4), 0, dp(4), dp(4)], spacing=dp(4))
+        # 2. Modern 5-Tab Navigation Bar
+        nav_tabs = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), padding=[dp(2), 0, dp(2), dp(4)], spacing=dp(3))
         
         self.btn_tab_work = Button(
             text="Log Work",
-            font_size='13sp',
+            font_size='12sp',
             bold=True,
             background_normal='',
             background_color=get_color_from_hex("#2563eb"),
@@ -169,8 +203,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         nav_tabs.add_widget(self.btn_tab_work)
 
         self.btn_tab_updates = Button(
-            text="My Updates",
-            font_size='13sp',
+            text="Updates",
+            font_size='12sp',
             bold=True,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
@@ -179,9 +213,20 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.btn_tab_updates.bind(on_release=lambda x: self.switch_tab("updates"))
         nav_tabs.add_widget(self.btn_tab_updates)
 
+        self.btn_tab_notes = Button(
+            text="Notes",
+            font_size='12sp',
+            bold=True,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            color=get_color_from_hex("#94a3b8")
+        )
+        self.btn_tab_notes.bind(on_release=lambda x: self.switch_tab("notes"))
+        nav_tabs.add_widget(self.btn_tab_notes)
+
         self.btn_tab_chat = Button(
-            text="Team Chat",
-            font_size='13sp',
+            text="Chat",
+            font_size='12sp',
             bold=True,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
@@ -191,8 +236,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         nav_tabs.add_widget(self.btn_tab_chat)
 
         self.btn_tab_remind = Button(
-            text="Reminders",
-            font_size='13sp',
+            text="Alerts",
+            font_size='12sp',
             bold=True,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
@@ -210,6 +255,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Build individual tab views
         self.view_work = self.build_work_view()
         self.view_updates = self.build_history_view()
+        self.view_notes = self.build_notes_view()
         self.view_chat = self.build_chat_view()
         self.view_remind = self.build_reminders_view()
 
@@ -235,14 +281,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.content_container.clear_widgets()
 
         # Reset button styling
-        self.btn_tab_work.background_color = get_color_from_hex("#1e293b")
-        self.btn_tab_work.color = get_color_from_hex("#94a3b8")
-        self.btn_tab_updates.background_color = get_color_from_hex("#1e293b")
-        self.btn_tab_updates.color = get_color_from_hex("#94a3b8")
-        self.btn_tab_chat.background_color = get_color_from_hex("#1e293b")
-        self.btn_tab_chat.color = get_color_from_hex("#94a3b8")
-        self.btn_tab_remind.background_color = get_color_from_hex("#1e293b")
-        self.btn_tab_remind.color = get_color_from_hex("#94a3b8")
+        for btn in (self.btn_tab_work, self.btn_tab_updates, self.btn_tab_notes, self.btn_tab_chat, self.btn_tab_remind):
+            btn.background_color = get_color_from_hex("#1e293b")
+            btn.color = get_color_from_hex("#94a3b8")
 
         if tab_name == "work":
             self.btn_tab_work.background_color = get_color_from_hex("#2563eb")
@@ -253,11 +294,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.btn_tab_updates.color = (1, 1, 1, 1)
             self.content_container.add_widget(self.view_updates)
             self.refresh_history_list()
+        elif tab_name == "notes":
+            self.btn_tab_notes.background_color = get_color_from_hex("#2563eb")
+            self.btn_tab_notes.color = (1, 1, 1, 1)
+            self.content_container.add_widget(self.view_notes)
+            self.refresh_notes_list()
         elif tab_name == "chat":
             self.btn_tab_chat.background_color = get_color_from_hex("#2563eb")
             self.btn_tab_chat.color = (1, 1, 1, 1)
             self.unread_chat_count = 0
-            self.btn_tab_chat.text = "Team Chat"
+            self.btn_tab_chat.text = "Chat"
             self.content_container.add_widget(self.view_chat)
             self.refresh_chat_messages_ui()
             Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.1)
@@ -840,7 +886,390 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         popup.open()
 
     # =========================================================================
-    # TAB 3: LAN TEAM CHAT VIEW
+    # TAB 3: WORK & PERSONAL NOTES VIEW
+    # =========================================================================
+    def build_notes_view(self):
+        root = BoxLayout(orientation='vertical', padding=[dp(10), dp(6), dp(10), dp(6)], spacing=dp(8))
+
+        # Top Bar: Search Input + New Note Button
+        top_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(6))
+        self.in_notes_search = TextInput(
+            hint_text="Search notes by title, tag, or content...",
+            multiline=False,
+            font_size='13sp',
+            size_hint_x=0.72,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            hint_text_color=get_color_from_hex("#64748b"),
+            padding=[dp(10), dp(11)]
+        )
+        self.in_notes_search.bind(text=lambda s, val: self.refresh_notes_list())
+        top_row.add_widget(self.in_notes_search)
+
+        btn_add_note = Button(
+            text="+ Note",
+            font_size='13sp',
+            bold=True,
+            size_hint_x=0.28,
+            background_normal='',
+            background_color=get_color_from_hex("#10b981"),
+            color=(1, 1, 1, 1)
+        )
+        btn_add_note.bind(on_release=lambda x: self.open_note_editor(None))
+        top_row.add_widget(btn_add_note)
+        root.add_widget(top_row)
+
+        # Category Filter Bar (All, Work, Meeting, Ideas, Todo, Urgent, Personal)
+        self.current_note_filter = "All"
+        cat_scroll = ScrollView(size_hint_y=None, height=dp(34), do_scroll_x=True, do_scroll_y=False)
+        self.cat_box = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(34), spacing=dp(6))
+        self.cat_box.bind(minimum_width=self.cat_box.setter('width'))
+        categories = ["All", "Work", "Meeting", "Ideas", "Todo", "Urgent", "Personal"]
+        self.cat_buttons = {}
+        for cat in categories:
+            btn_cat = Button(
+                text=cat,
+                font_size='12sp',
+                bold=True,
+                size_hint_x=None,
+                width=dp(70) if len(cat) > 4 else dp(55),
+                background_normal='',
+                background_color=get_color_from_hex("#2563eb" if cat == "All" else "#1e293b"),
+                color=(1, 1, 1, 1) if cat == "All" else get_color_from_hex("#94a3b8")
+            )
+            btn_cat.bind(on_release=lambda x, c=cat: self._set_note_filter(c))
+            self.cat_buttons[cat] = btn_cat
+            self.cat_box.add_widget(btn_cat)
+        cat_scroll.add_widget(self.cat_box)
+        root.add_widget(cat_scroll)
+
+        # Notes List ScrollView
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        self.notes_list_layout = GridLayout(cols=1, spacing=dp(8), size_hint_y=None, padding=[0, dp(4), 0, dp(12)])
+        self.notes_list_layout.bind(minimum_height=self.notes_list_layout.setter('height'))
+        scroll.add_widget(self.notes_list_layout)
+        root.add_widget(scroll)
+
+        return root
+
+    def _set_note_filter(self, cat):
+        self.current_note_filter = cat
+        for c, btn in self.cat_buttons.items():
+            if c == cat:
+                btn.background_color = get_color_from_hex("#2563eb")
+                btn.color = (1, 1, 1, 1)
+            else:
+                btn.background_color = get_color_from_hex("#1e293b")
+                btn.color = get_color_from_hex("#94a3b8")
+        self.refresh_notes_list()
+
+    def refresh_notes_list(self):
+        if not hasattr(self, 'notes_list_layout') or not self.notes_list_layout:
+            return
+        self.notes_list_layout.clear_widgets()
+
+        notes = load_notes() if 'load_notes' in globals() else []
+
+        search_q = self.in_notes_search.text.strip().lower() if hasattr(self, 'in_notes_search') and self.in_notes_search else ""
+        cur_filter = getattr(self, 'current_note_filter', 'All')
+
+        filtered = []
+        for n in notes:
+            n_title = str(n.get("title", "")).lower()
+            n_content = str(n.get("content", "")).lower()
+            n_tag = str(n.get("tag", "Work"))
+
+            if cur_filter != "All" and n_tag.lower() != cur_filter.lower():
+                continue
+
+            if search_q and (search_q not in n_title and search_q not in n_content and search_q not in n_tag.lower()):
+                continue
+
+            filtered.append(n)
+
+        # Sort: pinned notes first, then latest
+        filtered.sort(key=lambda x: (not x.get("is_pinned", False), x.get("updated_at", x.get("created_at", ""))), reverse=False)
+
+        if not filtered:
+            msg = "No notes matching your search." if search_q else "No notes yet.\nTap '+ Note' above to capture quick thoughts, sprint memos, or meeting tasks!"
+            lbl = Label(text=msg, font_size='13sp', color=get_color_from_hex("#64748b"), size_hint_y=None, height=dp(70), halign='center')
+            self.notes_list_layout.add_widget(lbl)
+            return
+
+        for n in filtered:
+            card = self._create_note_card(n)
+            self.notes_list_layout.add_widget(card)
+
+    def _create_note_card(self, note):
+        note_id = note.get("id")
+        title = note.get("title", "Untitled Note")
+        content = note.get("content", "")
+        tag = note.get("tag", "Work")
+        is_pinned = note.get("is_pinned", False)
+        time_str = note.get("updated_at") or note.get("created_at") or ""
+
+        card = BoxLayout(orientation='vertical', size_hint_y=None, padding=[dp(12), dp(10), dp(12), dp(10)], spacing=dp(6))
+        card.height = dp(132) if content else dp(96)
+
+        # Row 1: Pin icon + Title + Tag Badge
+        row1 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(24), spacing=dp(6))
+        
+        pin_prefix = "[color=#f59e0b]📌 [/color]" if is_pinned else ""
+        lbl_title = Label(
+            text=f"{pin_prefix}[b]{safe_escape_markup(title)}[/b]",
+            markup=True,
+            font_size='15sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_x=0.72,
+            halign='left',
+            valign='middle'
+        )
+        lbl_title.bind(size=lbl_title.setter('text_size'))
+        row1.add_widget(lbl_title)
+
+        tag_colors = {
+            "work": "#3b82f6",
+            "meeting": "#8b5cf6",
+            "ideas": "#f59e0b",
+            "todo": "#10b981",
+            "urgent": "#ef4444",
+            "personal": "#ec4899"
+        }
+        tag_c = tag_colors.get(tag.lower(), "#64748b")
+        lbl_tag = Label(
+            text=f"[b]{safe_escape_markup(tag)}[/b]",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex(tag_c),
+            size_hint_x=0.28,
+            halign='right',
+            valign='middle'
+        )
+        lbl_tag.bind(size=lbl_tag.setter('text_size'))
+        row1.add_widget(lbl_tag)
+        card.add_widget(row1)
+
+        # Row 2: Content snippet preview
+        if content:
+            snippet = (content[:95] + "...") if len(content) > 95 else content
+            lbl_cnt = Label(
+                text=safe_escape_markup(snippet),
+                font_size='13sp',
+                color=get_color_from_hex("#cbd5e1"),
+                size_hint_y=None,
+                height=dp(30),
+                halign='left',
+                valign='top'
+            )
+            lbl_cnt.bind(size=lbl_cnt.setter('text_size'))
+            card.add_widget(lbl_cnt)
+
+        # Row 3: Action Buttons (Edit, Share, Pin, Delete)
+        row_acts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(6))
+        
+        lbl_time = Label(
+            text=time_str,
+            font_size='10sp',
+            color=get_color_from_hex("#64748b"),
+            size_hint_x=0.32,
+            halign='left',
+            valign='middle'
+        )
+        lbl_time.bind(size=lbl_time.setter('text_size'))
+        row_acts.add_widget(lbl_time)
+
+        btn_edit = Button(text="Edit", font_size='11sp', bold=True, size_hint_x=0.18, background_normal='', background_color=get_color_from_hex("#334155"))
+        btn_edit.bind(on_release=lambda x, n=note: self.open_note_editor(n))
+        row_acts.add_widget(btn_edit)
+
+        btn_share = Button(text="Share", font_size='11sp', bold=True, size_hint_x=0.20, background_normal='', background_color=get_color_from_hex("#8b5cf6"))
+        btn_share.bind(on_release=lambda x, n=note: self.share_note_to_chat(n))
+        row_acts.add_widget(btn_share)
+
+        btn_pin = Button(text="Unpin" if is_pinned else "Pin", font_size='11sp', bold=True, size_hint_x=0.16, background_normal='', background_color=get_color_from_hex("#0284c7"))
+        btn_pin.bind(on_release=lambda x, nid=note_id: self.toggle_note_pin(nid))
+        row_acts.add_widget(btn_pin)
+
+        btn_del = Button(text="Del", font_size='11sp', bold=True, size_hint_x=0.14, background_normal='', background_color=get_color_from_hex("#dc2626"))
+        btn_del.bind(on_release=lambda x, nid=note_id: self.delete_note_item(nid))
+        row_acts.add_widget(btn_del)
+
+        card.add_widget(row_acts)
+        return card
+
+    def open_note_editor(self, note=None):
+        is_edit = note is not None
+        note_id = note.get("id") if is_edit else uuid.uuid4().hex[:10]
+
+        content = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(8))
+
+        content.add_widget(self._create_field_label("Note Title:"))
+        in_title = TextInput(
+            text=note.get("title", "") if is_edit else "",
+            hint_text="e.g. Sprint Tasks, Client Feedback, Standup Agenda",
+            multiline=False,
+            font_size='14sp',
+            size_hint_y=None,
+            height=dp(44),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(11)]
+        )
+        content.add_widget(in_title)
+
+        row_tag = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(8))
+        row_tag.add_widget(Label(text="Category:", font_size='13sp', color=(1, 1, 1, 1), size_hint_x=0.35, halign='left', valign='middle'))
+        sp_tag = Spinner(
+            text=note.get("tag", "Work") if is_edit else "Work",
+            values=('Work', 'Meeting', 'Ideas', 'Todo', 'Urgent', 'Personal'),
+            font_size='13sp',
+            size_hint_x=0.65,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        row_tag.add_widget(sp_tag)
+        content.add_widget(row_tag)
+
+        content.add_widget(self._create_field_label("Note Details / Content:"))
+        in_content = TextInput(
+            text=note.get("content", "") if is_edit else "",
+            hint_text="Type or paste your notes here...",
+            multiline=True,
+            font_size='13sp',
+            size_hint_y=None,
+            height=dp(170),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        content.add_widget(in_content)
+
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(6))
+        popup = Popup(title="Edit Note" if is_edit else "Create New Note", content=content, size_hint=(0.92, 0.75))
+
+        def _do_save_note(x):
+            t_val = in_title.text.strip()
+            c_val = in_content.text.strip()
+            tag_val = sp_tag.text
+
+            if not t_val and not c_val:
+                self.show_popup("Notice", "Please enter a note title or content.")
+                return
+
+            if not t_val:
+                t_val = (c_val[:30] + "...") if len(c_val) > 30 else c_val
+
+            notes = load_notes() if 'load_notes' in globals() else []
+            now_str = datetime.datetime.now().strftime("%b %d, %I:%M %p")
+
+            if is_edit:
+                for n in notes:
+                    if n.get("id") == note_id:
+                        n["title"] = t_val
+                        n["content"] = c_val
+                        n["tag"] = tag_val
+                        n["updated_at"] = now_str
+                        break
+            else:
+                new_n = {
+                    "id": note_id,
+                    "title": t_val,
+                    "content": c_val,
+                    "tag": tag_val,
+                    "is_pinned": False,
+                    "created_at": now_str,
+                    "updated_at": now_str
+                }
+                notes.insert(0, new_n)
+
+            if 'save_notes' in globals():
+                save_notes(notes)
+
+            popup.dismiss()
+            self.refresh_notes_list()
+
+        btn_save = Button(text="Save Note", font_size='14sp', bold=True, background_normal='', background_color=get_color_from_hex("#10b981"))
+        btn_save.bind(on_release=_do_save_note)
+        btn_row.add_widget(btn_save)
+
+        if Clipboard is not None:
+            btn_copy = Button(text="Copy", font_size='13sp', bold=True, background_normal='', background_color=get_color_from_hex("#0284c7"))
+            def _do_copy(x):
+                txt = f"{in_title.text.strip()}\n\n{in_content.text.strip()}"
+                try:
+                    Clipboard.copy(txt)
+                    self.show_popup("Copied", "Note text copied to clipboard!")
+                except Exception:
+                    pass
+            btn_copy.bind(on_release=_do_copy)
+            btn_row.add_widget(btn_copy)
+
+        btn_cancel = Button(text="Cancel", font_size='13sp', background_normal='', background_color=get_color_from_hex("#475569"))
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_row.add_widget(btn_cancel)
+
+        content.add_widget(btn_row)
+        popup.open()
+
+    def share_note_to_chat(self, note):
+        if not self.chat_engine:
+            self.show_popup("Notice", "LAN Chat is not initialized.")
+            return
+
+        title = note.get("title", "")
+        tag = note.get("tag", "Work")
+        content = note.get("content", "")
+
+        msg = f"📝 [b]Shared Note: {title}[/b]  ([color=#38bdf8]{tag}[/color])\n{content}"
+        try:
+            if hasattr(self.chat_engine, "send_chat_message"):
+                self.chat_engine.send_chat_message(msg)
+            elif hasattr(self.chat_engine, "send_broadcast_message"):
+                self.chat_engine.send_broadcast_message(msg)
+            self.show_popup("Note Shared", f"Note '{title}' shared with the LAN team!")
+        except Exception as e:
+            self.show_popup("Error", f"Failed to share note: {e}")
+
+    def toggle_note_pin(self, note_id):
+        notes = load_notes() if 'load_notes' in globals() else []
+        for n in notes:
+            if n.get("id") == note_id:
+                n["is_pinned"] = not n.get("is_pinned", False)
+                break
+        if 'save_notes' in globals():
+            save_notes(notes)
+        self.refresh_notes_list()
+
+    def delete_note_item(self, note_id):
+        content = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(10))
+        content.add_widget(Label(text="Are you sure you want to delete this note?", font_size='14sp', color=(1, 1, 1, 1), halign='center'))
+        
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(title="Confirm Deletion", content=content, size_hint=(0.85, 0.35))
+
+        def _do_del(x):
+            popup.dismiss()
+            notes = load_notes() if 'load_notes' in globals() else []
+            updated = [n for n in notes if n.get("id") != note_id]
+            if 'save_notes' in globals():
+                save_notes(updated)
+            self.refresh_notes_list()
+
+        btn_confirm = Button(text="Delete", background_color=get_color_from_hex("#dc2626"), bold=True)
+        btn_confirm.bind(on_release=_do_del)
+        btn_cancel = Button(text="Cancel", background_color=get_color_from_hex("#475569"))
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_row.add_widget(btn_confirm)
+        btn_row.add_widget(btn_cancel)
+        content.add_widget(btn_row)
+        popup.open()
+
+    # =========================================================================
+    # TAB 4: LAN TEAM CHAT VIEW
     # =========================================================================
     def build_chat_view(self):
         container = BoxLayout(orientation='vertical', padding=0, spacing=0)
@@ -1127,11 +1556,110 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.show_popup("Notice", "LAN Chat is not initialized.")
             return
 
-        start_dir = "/sdcard/Download" if (is_android() and os.path.isdir("/sdcard/Download")) else (
-            "/sdcard" if (is_android() and os.path.isdir("/sdcard")) else os.path.expanduser("~")
-        )
+        if is_android():
+            # Launch Android native file chooser (picks files, images, downloads, docs seamlessly)
+            try:
+                from jnius import autoclass
+                from android.activity import bind as android_activity_bind
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                Intent = autoclass('android.content.Intent')
 
-        content = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(8))
+                REQ_CODE = 9021
+
+                def _activity_callback(request_code, result_code, intent):
+                    if request_code == REQ_CODE:
+                        try:
+                            android_activity_bind(on_activity_result=None)
+                        except Exception:
+                            pass
+                        if intent is not None and result_code == -1:  # RESULT_OK == -1
+                            uri = intent.getData()
+                            if uri is not None:
+                                local_path = self._copy_android_uri_to_cache(uri)
+                                if local_path and os.path.isfile(local_path):
+                                    Clock.schedule_once(lambda dt: self._send_picked_file(local_path), 0)
+
+                android_activity_bind(on_activity_result=_activity_callback)
+
+                intent = Intent(Intent.ACTION_GET_CONTENT)
+                intent.setType("*/*")
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                chooser = Intent.createChooser(intent, "Select File to Share")
+                PythonActivity.mActivity.startActivityForResult(chooser, REQ_CODE)
+                return
+            except Exception as e:
+                print(f"Android native file chooser note: {e}")
+
+        # Fallback for desktop or if native intent fails
+        self._open_in_app_file_chooser()
+
+    def _copy_android_uri_to_cache(self, uri):
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            activity = PythonActivity.mActivity
+            cr = activity.getContentResolver()
+
+            filename = ""
+            try:
+                OpenableColumns = autoclass('android.provider.OpenableColumns')
+                cursor = cr.query(uri, None, None, None, None)
+                if cursor and cursor.moveToFirst():
+                    idx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
+                    if idx >= 0:
+                        filename = cursor.getString(idx)
+                    cursor.close()
+            except Exception as e:
+                print(f"Query filename error: {e}")
+
+            if not filename:
+                filename = f"shared_{int(time.time())}"
+
+            cache_dir = activity.getCacheDir().getAbsolutePath()
+            dest_path = os.path.join(cache_dir, filename)
+
+            in_stream = cr.openInputStream(uri)
+            if in_stream is None:
+                return None
+
+            with open(dest_path, "wb") as f_out:
+                buf = bytearray(65536)
+                while True:
+                    n = in_stream.read(buf)
+                    if n <= 0:
+                        break
+                    f_out.write(buf[:n])
+            in_stream.close()
+            return dest_path
+        except Exception as e:
+            print(f"Error copying uri to cache: {e}")
+            return None
+
+    def _send_picked_file(self, file_path):
+        if not file_path or not os.path.isfile(file_path):
+            self.show_popup("Error", "Selected file could not be read.")
+            return
+        if self.chat_engine:
+            try:
+                msg_obj = self.chat_engine.send_file(file_path)
+                if msg_obj:
+                    fn = os.path.basename(file_path)
+                    self.show_popup("File Shared", f"File '{fn}' broadcast to LAN team!")
+                    Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+                else:
+                    self.show_popup("Error", "Could not send file.")
+            except Exception as e:
+                self.show_popup("Error", f"File sending failed: {e}")
+
+    def _open_in_app_file_chooser(self):
+        # Quick directory resolver
+        start_dir = os.path.expanduser("~")
+        for d in ("/sdcard/Download", "/storage/emulated/0/Download", os.path.expanduser("~/Downloads"), "/sdcard"):
+            if os.path.isdir(d):
+                start_dir = d
+                break
+
+        content = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(6))
         lbl_info = Label(
             text="[b]Select File to Share on LAN[/b]",
             markup=True,
@@ -1144,9 +1672,22 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         filechooser = FileChooserListView(
             path=start_dir,
-            size_hint=(1, 1),
-            filters=['*.*']
+            size_hint=(1, 1)
         )
+
+        nav_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(4))
+        shortcuts = [
+            ("Downloads", "/sdcard/Download" if is_android() else os.path.expanduser("~/Downloads")),
+            ("Storage", "/sdcard" if is_android() else os.path.expanduser("~")),
+            ("Home", os.path.expanduser("~"))
+        ]
+        for name, p in shortcuts:
+            if os.path.isdir(p):
+                b = Button(text=name, font_size='11sp', background_normal='', background_color=get_color_from_hex("#334155"))
+                b.bind(on_release=lambda x, target=p: setattr(filechooser, 'path', target))
+                nav_row.add_widget(b)
+        content.add_widget(nav_row)
+
         content.add_widget(filechooser)
 
         lbl_selected = Label(
@@ -1177,15 +1718,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 return
             chosen_file = sel[0]
             popup.dismiss()
-            try:
-                msg_obj = self.chat_engine.send_file(chosen_file)
-                if msg_obj:
-                    self.show_popup("File Shared", f"File '{os.path.basename(chosen_file)}' broadcast to LAN team!")
-                    Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
-                else:
-                    self.show_popup("Error", "Could not send file.")
-            except Exception as e:
-                self.show_popup("Error", f"File sending failed: {e}")
+            self._send_picked_file(chosen_file)
 
         btn_send = Button(
             text="Send File",
@@ -1208,28 +1741,50 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         popup.open()
 
+    def get_best_download_dir(self):
+        if is_android():
+            try:
+                from jnius import autoclass
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                activity = PythonActivity.mActivity
+                Environment = autoclass('android.os.Environment')
+                ext_dir = activity.getExternalFilesDir(Environment.DIRECTORY_DOWNLOADS)
+                if ext_dir and ext_dir.exists():
+                    return ext_dir.getAbsolutePath()
+            except Exception:
+                pass
+            for d in ("/sdcard/Download", "/storage/emulated/0/Download"):
+                if os.path.isdir(d):
+                    try:
+                        test_p = os.path.join(d, ".wp_test")
+                        with open(test_p, "w") as f:
+                            f.write("1")
+                        os.remove(test_p)
+                        return d
+                    except Exception:
+                        pass
+        dl = os.path.join(os.path.expanduser("~"), "Downloads")
+        try:
+            os.makedirs(dl, exist_ok=True)
+            return dl
+        except Exception:
+            return get_storage_path("downloads")
+
     def download_chat_file(self, msg):
         if not self.chat_engine:
             self.show_popup("Notice", "LAN Chat engine is not active.")
             return
 
         file_name = msg.get("file_name", "downloaded_file")
-        target_dir = "/sdcard/Download" if (is_android() and os.path.isdir("/sdcard/Download")) else (
-            "/sdcard" if (is_android() and os.path.isdir("/sdcard")) else os.path.join(os.path.expanduser("~"), "Downloads")
-        )
-        if not os.path.exists(target_dir):
-            try:
-                os.makedirs(target_dir, exist_ok=True)
-            except Exception:
-                pass
+        target_dir = self.get_best_download_dir()
 
-        self.show_popup("Downloading", f"Downloading {file_name} from peer...")
+        self.show_popup("Downloading", f"Downloading '{file_name}' from peer...")
 
         def _on_done(saved_path):
-            Clock.schedule_once(lambda dt: self.show_popup("Download Complete", f"Saved to:\n{saved_path}"), 0)
+            Clock.schedule_once(lambda dt: self.show_popup("Download Complete", f"File saved successfully!\nLocation:\n{saved_path}"), 0)
 
         def _on_err(err_msg):
-            Clock.schedule_once(lambda dt: self.show_popup("Download Failed", f"Error: {err_msg}"), 0)
+            Clock.schedule_once(lambda dt: self.show_popup("Download Failed", f"Could not download '{file_name}':\n{err_msg}"), 0)
 
         self.chat_engine.download_file(
             msg,
@@ -1585,6 +2140,249 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.refresh_reminders_list()
 
     # =========================================================================
+    # SETTINGS MODAL DIALOG
+    # =========================================================================
+    def open_settings_popup(self, *args):
+        settings = load_all_settings() if 'load_all_settings' in globals() else (load_settings() if 'load_settings' in globals() else {})
+
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        form = GridLayout(cols=1, spacing=dp(10), padding=[dp(12), dp(10), dp(12), dp(16)], size_hint_y=None)
+        form.bind(minimum_height=form.setter('height'))
+
+        # Header Title
+        form.add_widget(Label(
+            text="[b]WorkPulse Settings[/b]",
+            markup=True,
+            font_size='16sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_y=None,
+            height=dp(28),
+            halign='center'
+        ))
+
+        # 1. Profile / LAN Chat Identity
+        form.add_widget(self._create_field_label("Your Name (Identity in Team Chat):"))
+        in_user_name = TextInput(
+            text=str(settings.get("user_name", "Developer")),
+            multiline=False,
+            font_size='14sp',
+            size_hint_y=None,
+            height=dp(44),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(11)]
+        )
+        form.add_widget(in_user_name)
+
+        form.add_widget(self._create_field_label("Default Project:"))
+        in_def_proj = TextInput(
+            text=str(settings.get("default_project", "General Work")),
+            multiline=False,
+            font_size='14sp',
+            size_hint_y=None,
+            height=dp(44),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(11)]
+        )
+        form.add_widget(in_def_proj)
+
+        # 2. Shift Timings
+        form.add_widget(self._create_field_label("Default Shift Timings (Login - Logout):"))
+        row_shift = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+        in_login_t = TextInput(
+            text=str(settings.get("default_login_time", "10:00 AM")),
+            multiline=False,
+            font_size='14sp',
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(11)]
+        )
+        in_logout_t = TextInput(
+            text=str(settings.get("default_logout_time", "07:00 PM")),
+            multiline=False,
+            font_size='14sp',
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(11)]
+        )
+        row_shift.add_widget(in_login_t)
+        row_shift.add_widget(in_logout_t)
+        form.add_widget(row_shift)
+
+        # 3. Google Sheet Integration
+        form.add_widget(self._create_field_label("Google Sheet Web App URL:"))
+        in_gsheet_url = TextInput(
+            text=str(settings.get("gsheet_webapp_url", "")),
+            multiline=False,
+            font_size='13sp',
+            size_hint_y=None,
+            height=dp(44),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(11)]
+        )
+        form.add_widget(in_gsheet_url)
+
+        # Google Sheet Options (Auto Sync & Startup Fetch)
+        is_auto_sync = settings.get("gsheet_auto_sync", True)
+        is_fetch_pri = settings.get("gsheet_fetch_priority", True)
+
+        row_gs_opts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        
+        btn_tog_sync = Button(
+            text=f"Auto-Sync: {'ON' if is_auto_sync else 'OFF'}",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#059669" if is_auto_sync else "#475569")
+        )
+        def _tog_sync(x):
+            nonlocal is_auto_sync
+            is_auto_sync = not is_auto_sync
+            btn_tog_sync.text = f"Auto-Sync: {'ON' if is_auto_sync else 'OFF'}"
+            btn_tog_sync.background_color = get_color_from_hex("#059669" if is_auto_sync else "#475569")
+        btn_tog_sync.bind(on_release=_tog_sync)
+        row_gs_opts.add_widget(btn_tog_sync)
+
+        btn_tog_fetch = Button(
+            text=f"Startup Fetch: {'ON' if is_fetch_pri else 'OFF'}",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7" if is_fetch_pri else "#475569")
+        )
+        def _tog_fetch(x):
+            nonlocal is_fetch_pri
+            is_fetch_pri = not is_fetch_pri
+            btn_tog_fetch.text = f"Startup Fetch: {'ON' if is_fetch_pri else 'OFF'}"
+            btn_tog_fetch.background_color = get_color_from_hex("#0284c7" if is_fetch_pri else "#475569")
+        btn_tog_fetch.bind(on_release=_tog_fetch)
+        row_gs_opts.add_widget(btn_tog_fetch)
+        form.add_widget(row_gs_opts)
+
+        # 4. Alerts & Reminders Settings
+        form.add_widget(self._create_field_label("Alerts & Reminders:"))
+        is_daily_on = settings.get("daily_shift_reminders_enabled", True)
+        is_sound_on = settings.get("reminder_sound", True)
+
+        row_al_opts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        btn_tog_daily = Button(
+            text=f"Shift Alerts: {'ON' if is_daily_on else 'OFF'}",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#0f766e" if is_daily_on else "#475569")
+        )
+        def _tog_daily(x):
+            nonlocal is_daily_on
+            is_daily_on = not is_daily_on
+            btn_tog_daily.text = f"Shift Alerts: {'ON' if is_daily_on else 'OFF'}"
+            btn_tog_daily.background_color = get_color_from_hex("#0f766e" if is_daily_on else "#475569")
+        btn_tog_daily.bind(on_release=_tog_daily)
+        row_al_opts.add_widget(btn_tog_daily)
+
+        btn_tog_sound = Button(
+            text=f"Chime Sound: {'ON' if is_sound_on else 'OFF'}",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#7c3aed" if is_sound_on else "#475569")
+        )
+        def _tog_sound(x):
+            nonlocal is_sound_on
+            is_sound_on = not is_sound_on
+            btn_tog_sound.text = f"Chime Sound: {'ON' if is_sound_on else 'OFF'}"
+            btn_tog_sound.background_color = get_color_from_hex("#7c3aed" if is_sound_on else "#475569")
+        btn_tog_sound.bind(on_release=_tog_sound)
+        row_al_opts.add_widget(btn_tog_sound)
+        form.add_widget(row_al_opts)
+
+        scroll.add_widget(form)
+
+        # Bottom Action Buttons Row
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), spacing=dp(8))
+        root_box = BoxLayout(orientation='vertical', padding=dp(6), spacing=dp(8))
+        root_box.add_widget(scroll)
+        root_box.add_widget(btn_row)
+
+        popup = Popup(title="WorkPulse Settings", content=root_box, size_hint=(0.94, 0.90))
+
+        def _do_save_settings(x):
+            new_name = in_user_name.text.strip() or "Developer"
+            new_proj = in_def_proj.text.strip() or "General Work"
+            new_login = in_login_t.text.strip() or "10:00 AM"
+            new_logout = in_logout_t.text.strip() or "07:00 PM"
+            new_url = in_gsheet_url.text.strip()
+
+            settings["user_name"] = new_name
+            settings["default_project"] = new_proj
+            settings["default_login_time"] = new_login
+            settings["default_logout_time"] = new_logout
+            settings["gsheet_webapp_url"] = new_url
+            settings["gsheet_auto_sync"] = is_auto_sync
+            settings["gsheet_fetch_priority"] = is_fetch_pri
+            settings["daily_shift_reminders_enabled"] = is_daily_on
+            settings["reminder_sound"] = is_sound_on
+
+            if 'save_all_settings' in globals():
+                save_all_settings(settings)
+            elif 'save_settings' in globals():
+                save_settings(settings)
+
+            self.settings = settings
+            if self.chat_engine:
+                self.chat_engine.user_name = new_name
+
+            # Update default values in Work Update form
+            if hasattr(self, 'in_proj') and self.in_proj:
+                if not self.in_proj.text.strip() or self.in_proj.text.strip() == "General Work":
+                    self.in_proj.text = new_proj
+            if hasattr(self, 'in_login') and self.in_login:
+                if not self.in_login.text.strip():
+                    self.in_login.text = new_login
+            if hasattr(self, 'in_logout') and self.in_logout:
+                if not self.in_logout.text.strip():
+                    self.in_logout.text = new_logout
+
+            popup.dismiss()
+            self.show_popup("Settings Saved", "Your settings have been updated and applied successfully!")
+
+        btn_save = Button(
+            text="💾 Save Settings",
+            font_size='14sp',
+            bold=True,
+            background_normal='',
+            background_color=get_color_from_hex("#2563eb"),
+            color=(1, 1, 1, 1)
+        )
+        btn_save.bind(on_release=_do_save_settings)
+        btn_row.add_widget(btn_save)
+
+        btn_close = Button(
+            text="Close",
+            font_size='14sp',
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close.bind(on_release=popup.dismiss)
+        btn_row.add_widget(btn_close)
+
+        popup.open()
+
+    # =========================================================================
     # FORM ACTIONS & INTEGRATIONS
     # =========================================================================
     def set_today(self):
@@ -1741,6 +2539,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     Permission.ACCESS_WIFI_STATE,
                     Permission.CHANGE_WIFI_MULTICAST_STATE,
                     Permission.POST_NOTIFICATIONS,
+                    Permission.READ_EXTERNAL_STORAGE,
+                    Permission.WRITE_EXTERNAL_STORAGE,
                 ])
             except Exception as e:
                 print(f"Notice: Android permissions: {e}")

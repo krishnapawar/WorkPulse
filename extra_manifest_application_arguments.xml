@@ -1,0 +1,2 @@
+android:usesCleartextTraffic="true" android:requestLegacyExternalStorage="true"
+
