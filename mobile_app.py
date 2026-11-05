@@ -98,7 +98,9 @@ try:
         format_date_only, FILE, sync_google_sheet_month,
         fetch_google_sheet_month, save_fetched_rows_to_excel,
         fetch_and_load_month_data, init_file,
-        get_available_months, load_month_records, delete_work_update
+        get_available_months, load_month_records, delete_work_update,
+        STANDARD_HOLIDAYS_2026, send_webhook_message, send_data_api_webhook,
+        ping_google_sheet, sync_month_holidays_and_weekly_offs, DEFAULT_SETTINGS
     )
 except Exception as e:
     print(f"Warning: app.py import: {e}")
@@ -124,7 +126,7 @@ except Exception as e:
     get_avatar_color = None
     get_initials = None
     def format_file_size(b): return f"{b} B"
-    def get_file_icon(fn): return "📁"
+    def get_file_icon(fn): return "[FILE]"
     def is_image_file(fn): return False
 
 
@@ -152,6 +154,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.rendered_msg_ids = set()
         self.current_tab = "work"
         self.downloaded_files = {}  # Cache of local files: {file_id: local_file_path}
+        self.active_dm_peer = None  # None = Public Room, or peer dict when in 1-on-1 DM
 
         # Main Root Container
         root = BoxLayout(orientation='vertical', padding=0, spacing=0)
@@ -162,30 +165,32 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         lbl_app = Label(
             text="[b]WorkPulse[/b] [color=#38bdf8]Mobile[/color]",
             markup=True,
-            font_size='18sp',
+            font_size='17sp',
             color=get_color_from_hex("#f8fafc"),
-            size_hint_x=0.52,
+            size_hint_x=0.48,
             halign='left',
             valign='middle'
         )
         lbl_app.bind(size=lbl_app.setter('text_size'))
         header.add_widget(lbl_app)
 
-        self.lbl_net_chip = Label(
+        self.btn_online_chip = Button(
             text="Online",
             font_size='11sp',
-            color=get_color_from_hex("#34d399"),
-            size_hint_x=0.34,
-            halign='right',
-            valign='middle'
+            bold=True,
+            size_hint_x=0.30,
+            background_normal='',
+            background_color=get_color_from_hex("#064e3b"),
+            color=get_color_from_hex("#34d399")
         )
-        self.lbl_net_chip.bind(size=self.lbl_net_chip.setter('text_size'))
-        header.add_widget(self.lbl_net_chip)
+        self.btn_online_chip.bind(on_release=self.open_online_team_popup)
+        header.add_widget(self.btn_online_chip)
 
         btn_settings = Button(
-            text="⚙️",
-            font_size='17sp',
-            size_hint_x=0.14,
+            text="Settings",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.22,
             background_normal='',
             background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
@@ -1021,7 +1026,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Row 1: Pin icon + Title + Tag Badge
         row1 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(24), spacing=dp(6))
         
-        pin_prefix = "[color=#f59e0b]📌 [/color]" if is_pinned else ""
+        pin_prefix = "[color=#f59e0b][PIN] [/color]" if is_pinned else ""
         lbl_title = Label(
             text=f"{pin_prefix}[b]{safe_escape_markup(title)}[/b]",
             markup=True,
@@ -1230,7 +1235,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         tag = note.get("tag", "Work")
         content = note.get("content", "")
 
-        msg = f"📝 [b]Shared Note: {title}[/b]  ([color=#38bdf8]{tag}[/color])\n{content}"
+        msg = f"[NOTE] [b]Shared Note: {title}[/b]  ([color=#38bdf8]{tag}[/color])\n{content}"
         try:
             if hasattr(self.chat_engine, "send_chat_message"):
                 self.chat_engine.send_chat_message(msg)
@@ -1281,24 +1286,36 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         container = BoxLayout(orientation='vertical', padding=0, spacing=0)
 
         # Chat Header Status Card
-        chat_top = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), padding=[dp(8), dp(4), dp(8), dp(4)], spacing=dp(6))
+        chat_top = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), padding=[dp(6), dp(4), dp(6), dp(4)], spacing=dp(4))
         
         self.lbl_chat_status = Label(
             text="Connecting to LAN...",
             font_size='11sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.32,
+            size_hint_x=0.24,
             halign='left',
             valign='middle'
         )
         self.lbl_chat_status.bind(size=self.lbl_chat_status.setter('text_size'))
         chat_top.add_widget(self.lbl_chat_status)
 
+        self.btn_team_ctrl = Button(
+            text="Team (0)",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.20,
+            background_normal='',
+            background_color=get_color_from_hex("#2563eb"),
+            color=(1, 1, 1, 1)
+        )
+        self.btn_team_ctrl.bind(on_release=self.open_online_team_popup)
+        chat_top.add_widget(self.btn_team_ctrl)
+
         btn_share_file = Button(
             text="Send File",
-            font_size='12sp',
+            font_size='11sp',
             bold=True,
-            size_hint_x=0.22,
+            size_hint_x=0.20,
             background_normal='',
             background_color=get_color_from_hex("#059669"),
             color=(1, 1, 1, 1)
@@ -1308,9 +1325,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         btn_share_task = Button(
             text="Tasks",
-            font_size='12sp',
+            font_size='11sp',
             bold=True,
-            size_hint_x=0.18,
+            size_hint_x=0.14,
             background_normal='',
             background_color=get_color_from_hex("#8b5cf6"),
             color=(1, 1, 1, 1)
@@ -1320,9 +1337,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         btn_add_ip = Button(
             text="+ IP",
-            font_size='12sp',
+            font_size='11sp',
             bold=True,
-            size_hint_x=0.14,
+            size_hint_x=0.10,
             background_normal='',
             background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
@@ -1332,9 +1349,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         btn_rescan = Button(
             text="Rescan",
-            font_size='12sp',
+            font_size='11sp',
             bold=True,
-            size_hint_x=0.14,
+            size_hint_x=0.12,
             background_normal='',
             background_color=get_color_from_hex("#0284c7"),
             color=(1, 1, 1, 1)
@@ -1343,6 +1360,40 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         chat_top.add_widget(btn_rescan)
 
         container.add_widget(chat_top)
+
+        # Active Team Strip (Horizontal Scroll of Online Members)
+        self.team_strip_scroll = ScrollView(size_hint_y=None, height=dp(36), do_scroll_x=True, do_scroll_y=False)
+        self.team_strip_layout = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(36), spacing=dp(6), padding=[dp(8), dp(2), dp(8), dp(4)])
+        self.team_strip_layout.bind(minimum_width=self.team_strip_layout.setter('width'))
+        self.team_strip_scroll.add_widget(self.team_strip_layout)
+        container.add_widget(self.team_strip_scroll)
+
+        # DM Status Banner (hidden by default, shows when inside 1-on-1 private chat)
+        self.dm_banner_layout = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(0), opacity=0, padding=[dp(8), dp(4)], spacing=dp(6))
+        self.dm_banner_lbl = Label(
+            text="Private Chat",
+            font_size='12sp',
+            bold=True,
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_x=0.75,
+            halign='left',
+            valign='middle'
+        )
+        self.dm_banner_lbl.bind(size=self.dm_banner_lbl.setter('text_size'))
+        self.dm_banner_layout.add_widget(self.dm_banner_lbl)
+
+        btn_exit_dm = Button(
+            text="✕ Public Room",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.25,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_exit_dm.bind(on_release=lambda x: self.switch_to_dm(None))
+        self.dm_banner_layout.add_widget(btn_exit_dm)
+        container.add_widget(self.dm_banner_layout)
 
         # Chat Message Stream ScrollView
         self.chat_scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
@@ -1355,9 +1406,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.chat_input_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(54), padding=[dp(6), dp(4), dp(6), dp(6)], spacing=dp(6))
         
         btn_attach = Button(
-            text="📎",
-            font_size='18sp',
-            size_hint_x=0.14,
+            text="+ File",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.16,
             background_normal='',
             background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
@@ -1434,33 +1486,373 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             Clock.schedule_once(lambda dt: self._update_network_status_labels(), 0)
 
     def _handle_new_incoming_message(self, msg_dict):
-        if self.current_tab != "chat":
-            self.unread_chat_count += 1
-            self.btn_tab_chat.text = f"Team Chat ({self.unread_chat_count})"
+        r_id = msg_dict.get("recipient_id", "")
+        s_id = msg_dict.get("sender_id", "")
+        my_id = self.chat_engine.user_id if self.chat_engine else ""
+
+        is_relevant = False
+        if self.active_dm_peer:
+            target_id = self.active_dm_peer.get("id")
+            if (r_id == target_id and s_id == my_id) or (r_id == my_id and s_id == target_id):
+                is_relevant = True
         else:
-            self.add_message_bubble(msg_dict)
-            Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+            if not r_id:
+                is_relevant = True
+
+        if is_relevant:
+            if self.current_tab != "chat":
+                self.unread_chat_count += 1
+                self.btn_tab_chat.text = f"Team Chat ({self.unread_chat_count})"
+            else:
+                self.add_message_bubble(msg_dict)
+                Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+
+    def switch_to_dm(self, peer=None):
+        """Switches between Public Team Room and 1-on-1 Private Direct Message."""
+        self.active_dm_peer = peer
+        if hasattr(self, 'dm_banner_layout'):
+            if peer:
+                p_name = peer.get('user_name', 'Colleague')
+                p_ip = peer.get('ip', '')
+                self.dm_banner_lbl.text = f"Private Chat with {p_name} ({p_ip})"
+                self.dm_banner_layout.height = dp(34)
+                self.dm_banner_layout.opacity = 1
+                if hasattr(self, 'in_chat_msg') and self.in_chat_msg:
+                    self.in_chat_msg.hint_text = f"Message {p_name} (Private)..."
+            else:
+                self.dm_banner_layout.height = dp(0)
+                self.dm_banner_layout.opacity = 0
+                if hasattr(self, 'in_chat_msg') and self.in_chat_msg:
+                    self.in_chat_msg.hint_text = "Type a message to team..."
+
+        self._update_network_status_labels()
+        self.refresh_chat_messages_ui()
 
     def _update_network_status_labels(self):
         if not self.chat_engine:
             if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
                 self.lbl_chat_status.text = "Offline"
+            if hasattr(self, 'btn_online_chip') and self.btn_online_chip:
+                self.btn_online_chip.text = "Offline"
             return
+
         ip = self.chat_engine.local_ip
         peer_cnt = len(self.chat_engine.peers)
         txt = f"IP: {ip} | Peers: {peer_cnt}"
         if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
             self.lbl_chat_status.text = txt
-        if hasattr(self, 'lbl_net_chip') and self.lbl_net_chip:
-            self.lbl_net_chip.text = f"{peer_cnt} Online" if peer_cnt > 0 else f"{ip}"
+
+        chip_txt = f"{peer_cnt} Online" if peer_cnt > 0 else f"{ip}"
+        if hasattr(self, 'btn_online_chip') and self.btn_online_chip:
+            self.btn_online_chip.text = chip_txt
+
+        if hasattr(self, 'btn_team_ctrl') and self.btn_team_ctrl:
+            self.btn_team_ctrl.text = f"Team ({peer_cnt})"
+
+        # Rebuild Active Team Strip
+        if hasattr(self, 'team_strip_layout') and self.team_strip_layout:
+            self.team_strip_layout.clear_widgets()
+
+            b_all = Button(
+                text="Public Room",
+                font_size='11sp',
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(96), dp(30)),
+                background_normal='',
+                background_color=get_color_from_hex("#2563eb" if self.active_dm_peer is None else "#334155"),
+                color=(1, 1, 1, 1)
+            )
+            b_all.bind(on_release=lambda x: self.switch_to_dm(None))
+            self.team_strip_layout.add_widget(b_all)
+
+            for peer in self.chat_engine.peers.values():
+                p_name = peer.get("user_name", "Peer")
+                p_ip = peer.get("ip", "")
+                is_active = bool(self.active_dm_peer and self.active_dm_peer.get("id") == peer.get("id"))
+                b_peer = Button(
+                    text=f"● {p_name} ({p_ip})",
+                    font_size='11sp',
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(max(110, len(p_name)*8 + 80)), dp(30)),
+                    background_normal='',
+                    background_color=get_color_from_hex("#059669" if is_active else "#1e293b"),
+                    color=get_color_from_hex("#ffffff" if is_active else "#34d399")
+                )
+                b_peer.bind(on_release=lambda x, p=peer: self.switch_to_dm(p))
+                self.team_strip_layout.add_widget(b_peer)
+
+    def open_online_team_popup(self, *args):
+        if not self.chat_engine:
+            self.show_popup("Notice", "LAN Chat is not initialized.")
+            return
+
+        peers = list(self.chat_engine.peers.values())
+        my_name = self.chat_engine.user_name
+        my_ip = self.chat_engine.local_ip
+        count = len(peers)
+
+        content = BoxLayout(orientation='vertical', padding=dp(10), spacing=dp(8))
+
+        lbl_head = Label(
+            text=f"[b]Online Team Members ({count} Online)[/b]",
+            markup=True,
+            font_size='15sp',
+            size_hint_y=None,
+            height=dp(26),
+            color=get_color_from_hex("#38bdf8")
+        )
+        content.add_widget(lbl_head)
+
+        # Your device card
+        my_card = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(48), padding=[dp(8), dp(4), dp(8), dp(4)], spacing=dp(8))
+        lbl_my_avatar = Button(
+            text="YOU",
+            font_size='11sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(36), dp(36)),
+            background_normal='',
+            background_color=get_color_from_hex("#2563eb"),
+            color=(1, 1, 1, 1),
+            disabled=True,
+            disabled_color=(1, 1, 1, 1)
+        )
+        my_card.add_widget(lbl_my_avatar)
+
+        my_info = BoxLayout(orientation='vertical', size_hint_x=1, spacing=dp(1))
+        lbl_my_name = Label(
+            text=f"[b]{safe_escape_markup(my_name)} (You)[/b]",
+            markup=True,
+            font_size='13sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_y=None,
+            height=dp(18),
+            halign='left',
+            valign='middle'
+        )
+        lbl_my_name.bind(size=lbl_my_name.setter('text_size'))
+        my_info.add_widget(lbl_my_name)
+
+        lbl_my_sub = Label(
+            text=f"IP: {my_ip} • [color=#34d399]Host / Online[/color]",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex("#94a3b8"),
+            size_hint_y=None,
+            height=dp(16),
+            halign='left',
+            valign='middle'
+        )
+        lbl_my_sub.bind(size=lbl_my_sub.setter('text_size'))
+        my_info.add_widget(lbl_my_sub)
+        my_card.add_widget(my_info)
+        content.add_widget(my_card)
+
+        # Scrollable Peers List
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        peers_layout = GridLayout(cols=1, spacing=dp(8), padding=[dp(4), dp(4)], size_hint_y=None)
+        peers_layout.bind(minimum_height=peers_layout.setter('height'))
+
+        popup = Popup(title="LAN Team Members", content=content, size_hint=(0.95, 0.85))
+
+        if not peers:
+            lbl_empty = Label(
+                text="No colleagues found on this Wi-Fi network yet.\n\nTips:\n• Ensure phones/PCs are connected to same Wi-Fi or Hotspot.\n• Check firewall or tap '+ Add IP' if on another subnet.\n• Tap 'Rescan' to broadcast discovery beacon.",
+                font_size='12sp',
+                color=get_color_from_hex("#94a3b8"),
+                size_hint_y=None,
+                height=dp(110),
+                halign='center'
+            )
+            peers_layout.add_widget(lbl_empty)
+        else:
+            for peer in peers:
+                p_name = peer.get("user_name", "Colleague")
+                p_ip = peer.get("ip", "")
+                p_host = peer.get("hostname", "Device")
+                p_color = peer.get("avatar_color", "#059669")
+                initials = get_initials(p_name) if 'get_initials' in globals() else p_name[:2].upper()
+
+                card = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(84), padding=[dp(8), dp(6), dp(8), dp(6)], spacing=dp(6))
+
+                row_top = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(36), spacing=dp(8))
+                
+                av_btn = Button(
+                    text=f"[b]{initials}[/b]",
+                    markup=True,
+                    font_size='12sp',
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(34), dp(34)),
+                    background_normal='',
+                    background_color=get_color_from_hex(p_color if (isinstance(p_color, str) and p_color.startswith('#')) else "#059669"),
+                    color=(1, 1, 1, 1),
+                    disabled=True,
+                    disabled_color=(1, 1, 1, 1)
+                )
+                row_top.add_widget(av_btn)
+
+                p_info = BoxLayout(orientation='vertical', size_hint_x=1, spacing=dp(1))
+                lbl_pn = Label(
+                    text=f"[b]{safe_escape_markup(p_name)}[/b]",
+                    markup=True,
+                    font_size='13sp',
+                    color=get_color_from_hex("#f8fafc"),
+                    size_hint_y=None,
+                    height=dp(18),
+                    halign='left',
+                    valign='middle'
+                )
+                lbl_pn.bind(size=lbl_pn.setter('text_size'))
+                p_info.add_widget(lbl_pn)
+
+                lbl_ps = Label(
+                    text=f"IP: {p_ip} • [color=#34d399]Online[/color] ({p_host})",
+                    markup=True,
+                    font_size='11sp',
+                    color=get_color_from_hex("#94a3b8"),
+                    size_hint_y=None,
+                    height=dp(16),
+                    halign='left',
+                    valign='middle'
+                )
+                lbl_ps.bind(size=lbl_ps.setter('text_size'))
+                p_info.add_widget(lbl_ps)
+                row_top.add_widget(p_info)
+                card.add_widget(row_top)
+
+                btn_actions = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(30), spacing=dp(6))
+                
+                btn_dm = Button(
+                    text="Private DM",
+                    font_size='11sp',
+                    bold=True,
+                    size_hint_x=0.5,
+                    background_normal='',
+                    background_color=get_color_from_hex("#2563eb"),
+                    color=(1, 1, 1, 1)
+                )
+                def _do_dm(x, target_peer=peer):
+                    popup.dismiss()
+                    self.switch_to_dm(target_peer)
+                btn_dm.bind(on_release=_do_dm)
+                btn_actions.add_widget(btn_dm)
+
+                btn_send_p = Button(
+                    text="Send File",
+                    font_size='11sp',
+                    bold=True,
+                    size_hint_x=0.5,
+                    background_normal='',
+                    background_color=get_color_from_hex("#059669"),
+                    color=(1, 1, 1, 1)
+                )
+                def _do_send_to_peer(x, target_peer=peer):
+                    popup.dismiss()
+                    self.switch_to_dm(target_peer)
+                    self.open_file_picker_popup()
+                btn_send_p.bind(on_release=_do_send_to_peer)
+                btn_actions.add_widget(btn_send_p)
+
+                card.add_widget(btn_actions)
+                peers_layout.add_widget(card)
+
+        scroll.add_widget(peers_layout)
+        content.add_widget(scroll)
+
+        # Bottom Controls
+        bottom_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        
+        btn_add = Button(
+            text="+ Add IP",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.35,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        def _go_add_ip(x):
+            popup.dismiss()
+            self.open_custom_ip_popup()
+        btn_add.bind(on_release=_go_add_ip)
+        bottom_bar.add_widget(btn_add)
+
+        btn_res = Button(
+            text="Rescan",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.35,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        def _go_rescan(x):
+            popup.dismiss()
+            self.rescan_lan_network()
+        btn_res.bind(on_release=_go_rescan)
+        bottom_bar.add_widget(btn_res)
+
+        btn_close = Button(
+            text="Close",
+            font_size='12sp',
+            size_hint_x=0.3,
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close.bind(on_release=popup.dismiss)
+        bottom_bar.add_widget(btn_close)
+
+        content.add_widget(bottom_bar)
+        popup.open()
 
     def refresh_chat_messages_ui(self):
         if not self.chat_engine:
             return
         self.chat_list_layout.clear_widgets()
         self.rendered_msg_ids.clear()
-        for msg in self.chat_engine.messages[-60:]:
+
+        filtered_msgs = []
+        if self.active_dm_peer:
+            peer_id = self.active_dm_peer.get("id")
+            my_id = self.chat_engine.user_id
+            for msg in self.chat_engine.messages:
+                r_id = msg.get("recipient_id", "")
+                s_id = msg.get("sender_id", "")
+                if (r_id == peer_id and s_id == my_id) or (r_id == my_id and s_id == peer_id):
+                    filtered_msgs.append(msg)
+        else:
+            for msg in self.chat_engine.messages:
+                if not msg.get("recipient_id"):
+                    filtered_msgs.append(msg)
+
+        for msg in filtered_msgs[-60:]:
             self.add_message_bubble(msg)
+
+    def get_file_type_badge(self, filename):
+        ext = os.path.splitext(filename)[1].lower() if filename else ""
+        if ext in ('.mp4', '.mkv', '.avi', '.mov', '.3gp', '.webm', '.flv'):
+            return {"label": "VIDEO", "color": "#8b5cf6", "icon_txt": "VID"}
+        elif ext in ('.mp3', '.wav', '.m4a', '.ogg', '.opus', '.flac', '.aac'):
+            return {"label": "AUDIO", "color": "#06b6d4", "icon_txt": "AUD"}
+        elif ext in ('.png', '.jpg', '.jpeg', '.webp', '.gif', '.bmp'):
+            return {"label": "IMAGE", "color": "#f59e0b", "icon_txt": "IMG"}
+        elif ext in ('.pdf',):
+            return {"label": "PDF", "color": "#ef4444", "icon_txt": "PDF"}
+        elif ext in ('.xls', '.xlsx', '.csv'):
+            return {"label": "EXCEL", "color": "#10b981", "icon_txt": "XLS"}
+        elif ext in ('.doc', '.docx', '.txt', '.rtf', '.odt', '.md'):
+            return {"label": "DOC", "color": "#2563eb", "icon_txt": "DOC"}
+        elif ext in ('.zip', '.rar', '.7z', '.tar', '.gz'):
+            return {"label": "ZIP", "color": "#6366f1", "icon_txt": "ZIP"}
+        elif ext in ('.apk',):
+            return {"label": "APK", "color": "#14b8a6", "icon_txt": "APK"}
+        elif ext in ('.py', '.js', '.json', '.xml', '.html', '.css', '.sh', '.c', '.cpp'):
+            return {"label": "CODE", "color": "#38bdf8", "icon_txt": "CODE"}
+        return {"label": "FILE", "color": "#64748b", "icon_txt": "FILE"}
 
     def add_message_bubble(self, msg):
         msg_id = msg.get("id")
@@ -1503,7 +1895,6 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             fn = msg.get("file_name", "Shared File")
             fn_safe = safe_escape_markup(fn)
             fs_str = safe_escape_markup(msg.get("file_size_str") or format_file_size(msg.get("file_size", 0)))
-            f_icon = get_file_icon(fn) if 'get_file_icon' in globals() else "📁"
             caption = safe_escape_markup(msg.get("caption", "").strip())
             file_id = msg.get("file_id", "")
             is_image = msg.get("is_image", False) or (is_image_file(fn) if 'is_image_file' in globals() else False)
@@ -1514,17 +1905,24 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             # Desktop-style File Card widget container
             card = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(6), padding=[dp(10), dp(8), dp(10), dp(8)])
 
-            # Row 1: File Emoji Icon + File Name & Metadata
-            top_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
-            lbl_icon = Label(
-                text=f_icon,
-                font_size='24sp',
-                size_hint_x=None,
-                width=dp(38),
-                halign='center',
-                valign='middle'
+            # Row 1: File Type Badge + File Name & Metadata
+            top_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(8))
+            
+            badge_info = self.get_file_type_badge(fn)
+            lbl_badge = Button(
+                text=f"[b]{badge_info['icon_txt']}[/b]",
+                markup=True,
+                font_size='10sp',
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(42), dp(36)),
+                background_normal='',
+                background_color=get_color_from_hex(badge_info['color']),
+                color=(1, 1, 1, 1),
+                disabled=True,
+                disabled_color=(1, 1, 1, 1)
             )
-            top_box.add_widget(lbl_icon)
+            top_box.add_widget(lbl_badge)
 
             info_col = BoxLayout(orientation='vertical', size_hint_x=1, spacing=dp(2))
             lbl_name = Label(
@@ -1533,7 +1931,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 font_size='13sp',
                 color=get_color_from_hex("#f8fafc"),
                 size_hint_y=None,
-                height=dp(22),
+                height=dp(20),
                 halign='left',
                 valign='middle',
                 shorten=True,
@@ -1544,7 +1942,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
             sub_txt = f"{fs_str} • Shared by you" if is_me else f"{fs_str} • LAN Transfer"
             if has_local:
-                sub_txt = f"[color=#10b981]✅ Saved[/color]  [color=#94a3b8]{fs_str}[/color]"
+                sub_txt = f"[color=#10b981][b]SAVED[/b][/color]  [color=#94a3b8]{fs_str}[/color]"
             lbl_meta = Label(
                 text=sub_txt,
                 markup=True,
@@ -1587,9 +1985,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(8))
             
             if has_local:
-                # File exists locally: show "📂 Open / View File" button
                 btn_open = Button(
-                    text="📂 Open / View File",
+                    text="VIEW / OPEN FILE",
                     font_size='13sp',
                     bold=True,
                     size_hint_x=1,
@@ -1600,10 +1997,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 btn_open.bind(on_release=lambda x, p=local_p: self.open_file_externally(p))
                 btn_row.add_widget(btn_open)
             else:
-                # File not downloaded yet: show BOTH "👁️ View" AND "⬇ Download" buttons
                 ext_l = os.path.splitext(fn)[1].lower()
                 is_media = ext_l in ('.mp4', '.mkv', '.avi', '.mov', '.3gp', '.mp3', '.wav', '.m4a', '.ogg', '.flac')
-                view_txt = "▶️ Play" if is_media else "👁️ View"
+                view_txt = "PLAY VIDEO" if ext_l in ('.mp4', '.mkv', '.avi', '.mov') else ("PLAY AUDIO" if is_media else "VIEW FILE")
 
                 btn_view = Button(
                     text=view_txt,
@@ -1615,7 +2011,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     color=(1, 1, 1, 1)
                 )
                 btn_dl = Button(
-                    text="⬇ Download",
+                    text="DOWNLOAD",
                     font_size='12sp',
                     bold=True,
                     size_hint_x=0.52,
@@ -1627,13 +2023,13 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 def _start_view(btn_inst, m=msg, r=btn_row, meta=lbl_meta):
                     btn_view.disabled = True
                     btn_dl.disabled = True
-                    btn_view.text = "⏳ Loading..."
+                    btn_view.text = "Loading..."
                     self.download_and_handle_file(m, is_preview=True, on_complete_open=True, btn_row=r, meta_lbl=meta)
 
                 def _start_download(btn_inst, m=msg, r=btn_row, meta=lbl_meta):
                     btn_view.disabled = True
                     btn_dl.disabled = True
-                    btn_dl.text = "⏳ Downloading..."
+                    btn_dl.text = "Downloading..."
                     self.download_and_handle_file(m, is_preview=False, on_complete_open=False, btn_row=r, meta_lbl=meta)
 
                 btn_view.bind(on_release=_start_view)
@@ -1644,7 +2040,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             card.add_widget(btn_row)
 
             # Compute Card & Bubble Height
-            c_height = dp(44) + dp(38) + dp(14)
+            c_height = dp(42) + dp(38) + dp(14)
             if caption:
                 c_height += dp(22)
             if is_image and has_local and Image is not None and Image is not object:
@@ -1688,8 +2084,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if not text:
             return
         if self.chat_engine:
+            r_id = self.active_dm_peer.get("id", "") if self.active_dm_peer else ""
+            r_name = self.active_dm_peer.get("user_name", "") if self.active_dm_peer else ""
             if hasattr(self.chat_engine, "send_chat_message"):
-                self.chat_engine.send_chat_message(text)
+                self.chat_engine.send_chat_message(text, recipient_id=r_id, recipient_name=r_name)
             elif hasattr(self.chat_engine, "send_broadcast_message"):
                 self.chat_engine.send_broadcast_message(text)
             self.in_chat_msg.text = ""
@@ -1852,8 +2250,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Top Button: Launch Android Native System Picker
         if is_android():
             btn_system_picker = Button(
-                text="📱 Open System Files / Gallery (Photos, Docs, Downloads)",
-                font_size='12sp',
+                text="Open System Files / Gallery App",
+                font_size='13sp',
                 bold=True,
                 size_hint_y=None,
                 height=dp(42),
@@ -1866,10 +2264,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Directory Path Bar & Up Navigation Button
         path_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(6))
         btn_up = Button(
-            text="⬆️ Up",
+            text="Up Folder",
             font_size='12sp',
             bold=True,
-            size_hint_x=0.22,
+            size_hint_x=0.25,
             background_normal='',
             background_color=get_color_from_hex("#475569"),
             color=(1, 1, 1, 1)
@@ -1877,10 +2275,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         path_bar.add_widget(btn_up)
 
         lbl_path = Label(
-            text=f"📁 {start_dir}",
+            text=f"Folder: {start_dir}",
             font_size='11sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.78,
+            size_hint_x=0.75,
             halign='left',
             valign='middle',
             shorten=True,
@@ -1916,7 +2314,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 def _do_nav(btn_inst, target_path=p):
                     filechooser.path = target_path
                     filechooser.selection = []
-                    lbl_path.text = f"📁 {target_path}"
+                    lbl_path.text = f"Folder: {target_path}"
                     lbl_selected.text = "Tap a folder to open, or tap a file to select."
                     btn_send.text = "Send File"
                     btn_send.background_color = get_color_from_hex("#059669")
@@ -1928,7 +2326,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         # Status / Selected item indicator
         lbl_selected = Label(
-            text="💡 Tap any folder (e.g. resumes) to open. Tap a file to select.",
+            text="Tap any folder to enter. Tap a file to select.",
             markup=True,
             font_size='11sp',
             size_hint_y=None,
@@ -1956,7 +2354,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             if parent and parent != cur and os.path.isdir(parent):
                 filechooser.path = parent
                 filechooser.selection = []
-                lbl_path.text = f"📁 {parent}"
+                lbl_path.text = f"Folder: {parent}"
                 lbl_selected.text = "Tap a folder to open, or tap a file to select."
                 btn_send.text = "Send File"
                 btn_send.background_color = get_color_from_hex("#059669")
@@ -1973,7 +2371,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 if chooser.path != target:
                     chooser.path = target
                     chooser.selection = []
-                    lbl_path.text = f"📁 {target}"
+                    lbl_path.text = f"Folder: {target}"
                     lbl_selected.text = f"Inside: [b]{os.path.basename(target)}[/b]. Tap a file to select."
                     btn_send.text = "Send File"
                     btn_send.background_color = get_color_from_hex("#059669")
@@ -1983,9 +2381,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     sz_str = format_file_size(os.path.getsize(target))
                 except Exception:
                     sz_str = ""
-                f_ic = get_file_icon(fn) if 'get_file_icon' in globals() else "📁"
-                lbl_selected.text = f"{f_ic} Selected: [b]{safe_escape_markup(fn)}[/b] ({sz_str})"
-                btn_send.text = f"Send {f_ic} '{fn[:16]}...'" if len(fn) > 16 else f"Send {f_ic} '{fn}'"
+                b_info = self.get_file_type_badge(fn)
+                lbl_selected.text = f"[{b_info['icon_txt']}] Selected: [b]{safe_escape_markup(fn)}[/b] ({sz_str})"
+                btn_send.text = f"Send [{b_info['icon_txt']}] '{fn[:14]}...'" if len(fn) > 14 else f"Send [{b_info['icon_txt']}] '{fn}'"
                 btn_send.background_color = get_color_from_hex("#10b981")
 
         filechooser.bind(selection=_on_selection_change)
@@ -2225,7 +2623,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             cur_s = format_file_size(cur)
             def _update_ui(dt):
                 if btn_row and len(btn_row.children) > 0:
-                    prefix = "👁️" if is_preview else "📥"
+                    prefix = "Loading" if is_preview else "Saving"
                     btn = btn_row.children[0] if not is_preview else btn_row.children[-1]
                     btn.text = f"{prefix} {pct}% ({cur_s})"
             Clock.schedule_once(_update_ui, 0)
@@ -2239,12 +2637,12 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
                 if meta_lbl:
                     f_sz = os.path.getsize(saved_path) if os.path.isfile(saved_path) else msg.get("file_size", 0)
-                    meta_lbl.text = f"[color=#10b981]✅ Saved[/color]  [color=#94a3b8]{format_file_size(f_sz)}[/color]"
+                    meta_lbl.text = f"[color=#10b981][b]SAVED[/b][/color]  [color=#94a3b8]{format_file_size(f_sz)}[/color]"
 
                 if btn_row:
                     btn_row.clear_widgets()
                     btn_open = Button(
-                        text="📂 Open / View File",
+                        text="VIEW / OPEN FILE",
                         font_size='13sp',
                         bold=True,
                         size_hint_x=1,
@@ -2268,9 +2666,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     for child in btn_row.children:
                         child.disabled = False
                         if "view" in child.text.lower() or "play" in child.text.lower():
-                            child.text = "👁️ View"
+                            child.text = "VIEW / PLAY"
                         else:
-                            child.text = "⬇ Download"
+                            child.text = "DOWNLOAD"
                 self.show_popup("Download Failed", f"Could not load '{file_name}':\n{err_msg}")
             Clock.schedule_once(_err_ui, 0)
 
@@ -2482,7 +2880,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         # Immediate Test Alert Button
         btn_test_alert = Button(
-            text="🔔 Test Alert Now (Ringtone & Notification)",
+            text="Test Alert Now (Ringtone & Notification)",
             font_size='14sp',
             bold=True,
             size_hint_y=None,
@@ -2636,197 +3034,697 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
     # =========================================================================
     def open_settings_popup(self, *args):
         settings = load_all_settings() if 'load_all_settings' in globals() else (load_settings() if 'load_settings' in globals() else {})
+        holidays_list = list(settings.get("holidays", STANDARD_HOLIDAYS_2026 if 'STANDARD_HOLIDAYS_2026' in globals() else []))
+        weekly_offs = set(settings.get("weekly_offs", ["Sunday"]))
 
-        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
-        form = GridLayout(cols=1, spacing=dp(10), padding=[dp(12), dp(10), dp(12), dp(16)], size_hint_y=None)
-        form.bind(minimum_height=form.setter('height'))
+        # Mutable state for toggles and options
+        state = {
+            "platform": str(settings.get("webhook_type", "Microsoft Teams")),
+            "prompt_team_share": bool(settings.get("prompt_team_share_on_save", True)),
+            "auto_copy": bool(settings.get("auto_copy_on_save", True)),
+            "sec_fourth_sat": bool(settings.get("second_fourth_saturday", False)),
+            "api_edit": bool(settings.get("data_api_sync_on_edit", True)),
+            "api_create": bool(settings.get("data_api_sync_on_create", True)),
+            "api_delete": bool(settings.get("data_api_sync_on_delete", True)),
+            "gsheet_sync": bool(settings.get("gsheet_auto_sync", True)),
+            "gsheet_fetch": bool(settings.get("gsheet_fetch_priority", True)),
+            "rem_enabled": bool(settings.get("reminders_enabled", True)),
+            "rem_sound": bool(settings.get("reminder_sound", True)),
+            "rem_notify": bool(settings.get("reminder_desktop_notify", True)),
+            "rem_daily": bool(settings.get("daily_shift_reminders_enabled", True)),
+            "rem_skip": bool(settings.get("remind_skip_weekends_holidays", True)),
+        }
 
-        # Header Title
-        form.add_widget(Label(
-            text="[b]WorkPulse Settings[/b]",
+        # Root modal container
+        root_box = BoxLayout(orientation='vertical', padding=[dp(8), dp(6), dp(8), dp(8)], spacing=dp(6))
+
+        # Title bar with Close 'X'
+        title_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(36), spacing=dp(8))
+        lbl_modal_title = Label(
+            text="[b]Work Logger & Shift Configuration[/b]",
             markup=True,
-            font_size='16sp',
+            font_size='15sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_y=None,
-            height=dp(28),
-            halign='center'
-        ))
+            halign='left',
+            valign='middle'
+        )
+        lbl_modal_title.bind(size=lbl_modal_title.setter('text_size'))
+        title_bar.add_widget(lbl_modal_title)
 
-        # 1. Profile / LAN Chat Identity
-        form.add_widget(self._create_field_label("Your Name (Identity in Team Chat):"))
-        in_user_name = TextInput(
-            text=str(settings.get("user_name", "Developer")),
-            multiline=False,
+        btn_close_x = Button(
+            text="✕",
             font_size='14sp',
-            size_hint_y=None,
-            height=dp(44),
+            bold=True,
+            size_hint_x=None,
+            width=dp(36),
             background_normal='',
-            background_color=get_color_from_hex("#1e293b"),
-            foreground_color=(1, 1, 1, 1),
-            padding=[dp(10), dp(11)]
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
         )
-        form.add_widget(in_user_name)
+        title_bar.add_widget(btn_close_x)
+        root_box.add_widget(title_bar)
 
-        form.add_widget(self._create_field_label("Default Project:"))
-        in_def_proj = TextInput(
-            text=str(settings.get("default_project", "General Work")),
-            multiline=False,
-            font_size='14sp',
-            size_hint_y=None,
-            height=dp(44),
-            background_normal='',
-            background_color=get_color_from_hex("#1e293b"),
-            foreground_color=(1, 1, 1, 1),
-            padding=[dp(10), dp(11)]
-        )
-        form.add_widget(in_def_proj)
+        # Tab Navigation Bar (Horizontal ScrollView)
+        tab_scroll = ScrollView(size_hint=(1, None), height=dp(40), do_scroll_x=True, do_scroll_y=False)
+        tab_bar = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(38), spacing=dp(6))
+        tab_bar.bind(minimum_width=tab_bar.setter('width'))
+        tab_scroll.add_widget(tab_bar)
+        root_box.add_widget(tab_scroll)
 
-        # 2. Shift Timings
-        form.add_widget(self._create_field_label("Default Shift Timings (Login - Logout):"))
-        row_shift = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
-        in_login_t = TextInput(
-            text=str(settings.get("default_login_time", "10:00 AM")),
-            multiline=False,
-            font_size='14sp',
-            size_hint_x=0.5,
-            background_normal='',
-            background_color=get_color_from_hex("#1e293b"),
-            foreground_color=(1, 1, 1, 1),
-            padding=[dp(10), dp(11)]
-        )
-        in_logout_t = TextInput(
-            text=str(settings.get("default_logout_time", "07:00 PM")),
-            multiline=False,
-            font_size='14sp',
-            size_hint_x=0.5,
-            background_normal='',
-            background_color=get_color_from_hex("#1e293b"),
-            foreground_color=(1, 1, 1, 1),
-            padding=[dp(10), dp(11)]
-        )
-        row_shift.add_widget(in_login_t)
-        row_shift.add_widget(in_logout_t)
-        form.add_widget(row_shift)
+        # Content ScrollView & Container
+        content_scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        content_container = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(8), padding=[dp(4), dp(4), dp(4), dp(10)])
+        content_container.bind(minimum_height=content_container.setter('height'))
+        content_scroll.add_widget(content_container)
+        root_box.add_widget(content_scroll)
 
-        # 3. Google Sheet Integration
-        form.add_widget(self._create_field_label("Google Sheet Web App URL:"))
-        in_gsheet_url = TextInput(
-            text=str(settings.get("gsheet_webapp_url", "")),
-            multiline=False,
-            font_size='13sp',
-            size_hint_y=None,
-            height=dp(44),
-            background_normal='',
-            background_color=get_color_from_hex("#1e293b"),
-            foreground_color=(1, 1, 1, 1),
-            padding=[dp(10), dp(11)]
-        )
-        form.add_widget(in_gsheet_url)
+        # Helper to create inputs with consistent dark styling
+        def _make_input(val="", hint="", multiline=False, height_dp=42):
+            return TextInput(
+                text=str(val),
+                hint_text=hint,
+                multiline=multiline,
+                font_size='13sp',
+                size_hint_y=None,
+                height=dp(height_dp),
+                background_normal='',
+                background_color=get_color_from_hex("#1e293b"),
+                foreground_color=(1, 1, 1, 1),
+                hint_text_color=get_color_from_hex("#64748b"),
+                padding=[dp(10), dp(10)]
+            )
 
-        # Google Sheet Options (Auto Sync & Startup Fetch)
-        is_auto_sync = settings.get("gsheet_auto_sync", True)
-        is_fetch_pri = settings.get("gsheet_fetch_priority", True)
+        # Helper to create toggle buttons
+        def _make_toggle(label_prefix, key, on_color="#059669", off_color="#334155", on_text="ON", off_text="OFF"):
+            btn = Button(
+                text=f"{label_prefix}: {on_text if state[key] else off_text}",
+                font_size='12sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(40),
+                background_normal='',
+                background_color=get_color_from_hex(on_color if state[key] else off_color),
+                color=(1, 1, 1, 1)
+            )
+            def _toggle(b):
+                state[key] = not state[key]
+                b.text = f"{label_prefix}: {on_text if state[key] else off_text}"
+                b.background_color = get_color_from_hex(on_color if state[key] else off_color)
+            btn.bind(on_release=_toggle)
+            return btn
 
-        row_gs_opts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        # Persistent Input widgets across tab switches
+        # Tab 1: General & Shifts
+        in_user_name = _make_input(settings.get("user_name", "Developer"), "Your Name / Handle")
+        in_def_proj = _make_input(settings.get("default_project", "General Work"), "Default Project")
+        in_login_t = _make_input(settings.get("default_login_time", "10:00 AM"), "10:00 AM")
+        in_logout_t = _make_input(settings.get("default_logout_time", "07:30 PM"), "07:30 PM")
+        in_lunch = _make_input(settings.get("default_lunch_break", "01:00 PM - 02:00 PM"), "Lunch Break")
+        in_tea = _make_input(settings.get("default_tea_break", "04:30 PM - 04:45 PM"), "Tea Break")
+        in_webhook_url = _make_input(settings.get("webhook_url", ""), "https://outlook.office.com/webhook/...")
+
+        # Tab 2: Holidays
+        in_hol_date = _make_input(datetime.date.today().strftime("%Y-%m-%d"), "YYYY-MM-DD")
+        in_hol_name = _make_input("", "Holiday Name (e.g. Diwali, Eid)")
+
+        # Tab 3: Data API
+        in_api_url = _make_input(settings.get("data_api_url", ""), "https://api.yourcompany.com/v1/work-updates")
+        in_api_token = _make_input(settings.get("data_api_token", ""), "Bearer token or secret key")
+
+        # Tab 4: Google Sheet
+        in_gsheet_url = _make_input(settings.get("gsheet_webapp_url", ""), "https://script.google.com/macros/s/.../exec")
+
+        # ---------------- TAB DEFINITIONS ----------------
+        tab_names = [
+            ("General & Shifts", "#2563eb"),
+            ("Weekly Off & Holidays", "#0284c7"),
+            ("Data API / Webhook", "#0f766e"),
+            ("Google Sheet", "#059669"),
+            ("Reminders & Schedule", "#7c3aed")
+        ]
+        tab_buttons = []
+        active_tab_idx = [0]
+
+        # Builders for each tab
+        def _build_general_tab():
+            content_container.clear_widgets()
+
+            content_container.add_widget(self._create_field_label("Your Name / Handle (Identity in LAN Chat):"))
+            content_container.add_widget(in_user_name)
+
+            content_container.add_widget(self._create_field_label("Default Project:"))
+            content_container.add_widget(in_def_proj)
+
+            content_container.add_widget(self._create_field_label("Default Shift (Login - Logout):"))
+            row_s1 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+            row_s1.add_widget(in_login_t)
+            row_s1.add_widget(in_logout_t)
+            content_container.add_widget(row_s1)
+
+            content_container.add_widget(self._create_field_label("Default Breaks (Lunch & Tea):"))
+            row_s2 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+            row_s2.add_widget(in_lunch)
+            row_s2.add_widget(in_tea)
+            content_container.add_widget(row_s2)
+
+            content_container.add_widget(self._create_field_label("Team Notification Platform:"))
+            row_plat = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(5))
+            platforms = ["Microsoft Teams", "Slack / Discord", "Custom Webhook"]
+            plat_btns = []
+            for p in platforms:
+                p_btn = Button(
+                    text=p.split()[0] if p != "Slack / Discord" else "Slack/Disc",
+                    font_size='11sp',
+                    bold=True,
+                    background_normal='',
+                    background_color=get_color_from_hex("#2563eb" if state["platform"] == p else "#334155"),
+                    color=(1, 1, 1, 1)
+                )
+                def _sel_plat(b, target=p):
+                    state["platform"] = target
+                    for pb, name in plat_btns:
+                        pb.background_color = get_color_from_hex("#2563eb" if state["platform"] == name else "#334155")
+                p_btn.bind(on_release=_sel_plat)
+                plat_btns.append((p_btn, p))
+                row_plat.add_widget(p_btn)
+            content_container.add_widget(row_plat)
+
+            content_container.add_widget(self._create_field_label("Incoming Webhook URL:"))
+            content_container.add_widget(in_webhook_url)
+
+            # Webhook test button
+            btn_test_wh = Button(
+                text="Send Test Webhook Message",
+                font_size='12sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(38),
+                background_normal='',
+                background_color=get_color_from_hex("#0284c7"),
+                color=(1, 1, 1, 1)
+            )
+            def _do_test_wh(b):
+                wh_url = in_webhook_url.text.strip()
+                if not wh_url:
+                    self.show_popup("Notice", "Please enter an Incoming Webhook URL first.")
+                    return
+                b.text = "Sending test..."
+                b.disabled = True
+                def _thread_wh():
+                    if 'send_webhook_message' in globals():
+                        ok, msg = send_webhook_message(wh_url, "Test message from WorkPulse Mobile! Webhook connection verified successfully.", state["platform"])
+                        def _res(dt):
+                            b.text = "Send Test Webhook Message"
+                            b.disabled = False
+                            self.show_popup("Webhook Test", f"{'SUCCESS' if ok else 'FAILED'}:\n\n{msg}")
+                        Clock.schedule_once(_res, 0)
+                    else:
+                        def _err(dt):
+                            b.text = "Send Test Webhook Message"
+                            b.disabled = False
+                            self.show_popup("Notice", "Webhook module not available.")
+                        Clock.schedule_once(_err, 0)
+                threading.Thread(target=_thread_wh, daemon=True).start()
+            btn_test_wh.bind(on_release=_do_test_wh)
+            content_container.add_widget(btn_test_wh)
+
+            content_container.add_widget(self._create_field_label("Automation Preferences:"))
+            content_container.add_widget(_make_toggle("Open Team Share on Save", "prompt_team_share", on_color="#059669"))
+            content_container.add_widget(_make_toggle("Auto-copy Markdown Summary on Save", "auto_copy", on_color="#0284c7"))
+
+        def _build_holidays_tab():
+            content_container.clear_widgets()
+
+            content_container.add_widget(self._create_field_label("1. Weekly Off Days (Weekends):"))
+            row_days = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(4))
+            day_map = [("Mon", "Monday"), ("Tue", "Tuesday"), ("Wed", "Wednesday"), ("Thu", "Thursday"), ("Fri", "Friday"), ("Sat", "Saturday"), ("Sun", "Sunday")]
+            for short_d, full_d in day_map:
+                d_btn = Button(
+                    text=short_d,
+                    font_size='11sp',
+                    bold=True,
+                    background_normal='',
+                    background_color=get_color_from_hex("#2563eb" if full_d in weekly_offs else "#334155"),
+                    color=(1, 1, 1, 1)
+                )
+                def _tog_day(b, fd=full_d):
+                    if fd in weekly_offs:
+                        weekly_offs.remove(fd)
+                        b.background_color = get_color_from_hex("#334155")
+                    else:
+                        weekly_offs.add(fd)
+                        b.background_color = get_color_from_hex("#2563eb")
+                d_btn.bind(on_release=_tog_day)
+                row_days.add_widget(d_btn)
+            content_container.add_widget(row_days)
+
+            content_container.add_widget(_make_toggle("Include 2nd & 4th Saturday", "sec_fourth_sat", on_color="#0f766e", on_text="YES", off_text="NO"))
+
+            content_container.add_widget(self._create_field_label("2. Company & National Holidays:"))
+            row_date = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+            row_date.add_widget(in_hol_date)
+            btn_today = Button(
+                text="Today",
+                font_size='12sp',
+                bold=True,
+                size_hint_x=None,
+                width=dp(68),
+                background_normal='',
+                background_color=get_color_from_hex("#475569")
+            )
+            btn_today.bind(on_release=lambda x: setattr(in_hol_date, 'text', datetime.date.today().strftime("%Y-%m-%d")))
+            row_date.add_widget(btn_today)
+            content_container.add_widget(row_date)
+
+            content_container.add_widget(in_hol_name)
+
+            row_h_acts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(6))
+            btn_add_hol = Button(
+                text="+ Add Holiday",
+                font_size='12sp',
+                bold=True,
+                size_hint_x=0.5,
+                background_normal='',
+                background_color=get_color_from_hex("#2563eb")
+            )
+            btn_load_ind = Button(
+                text="Load Indian Holidays",
+                font_size='12sp',
+                bold=True,
+                size_hint_x=0.5,
+                background_normal='',
+                background_color=get_color_from_hex("#d97706")
+            )
+            row_h_acts.add_widget(btn_add_hol)
+            row_h_acts.add_widget(btn_load_ind)
+            content_container.add_widget(row_h_acts)
+
+            # Holidays dynamic list container
+            hol_list_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(5))
+            hol_list_box.bind(minimum_height=hol_list_box.setter('height'))
+
+            def _refresh_hol_ui():
+                hol_list_box.clear_widgets()
+                lbl_h_count.text = f"[b]Configured Holidays ({len(holidays_list)}):[/b]"
+                sorted_h = sorted(holidays_list, key=lambda x: x.get("date", ""))
+                for h in sorted_h:
+                    d_str = h.get("date", "")
+                    n_str = h.get("name", "")
+                    try:
+                        d_obj = datetime.datetime.strptime(d_str, "%Y-%m-%d")
+                        w_day = d_obj.strftime("%A")
+                    except Exception:
+                        w_day = "-"
+                    h_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+
+                    lbl_info = Label(
+                        text=f"[b]{d_str}[/b] • [color=#94a3b8]{w_day}[/color]  [color=#38bdf8]{safe_escape_markup(n_str)}[/color]",
+                        markup=True,
+                        font_size='12sp',
+                        size_hint_x=0.82,
+                        halign='left',
+                        valign='middle'
+                    )
+                    lbl_info.bind(size=lbl_info.setter('text_size'))
+                    h_row.add_widget(lbl_info)
+
+                    btn_del = Button(
+                        text="Del",
+                        font_size='11sp',
+                        bold=True,
+                        size_hint_x=None,
+                        width=dp(48),
+                        background_normal='',
+                        background_color=get_color_from_hex("#ef4444")
+                    )
+                    def _do_del_h(b, date_key=d_str):
+                        holidays_list[:] = [item for item in holidays_list if item.get("date") != date_key]
+                        _refresh_hol_ui()
+                    btn_del.bind(on_release=_do_del_h)
+                    h_row.add_widget(btn_del)
+                    hol_list_box.add_widget(h_row)
+
+            def _do_add_hol(b):
+                d_val = format_date_only(in_hol_date.text.strip())
+                n_val = in_hol_name.text.strip()
+                if not d_val or not n_val:
+                    self.show_popup("Notice", "Please enter a valid Date (YYYY-MM-DD) and Holiday Name.")
+                    return
+                try:
+                    datetime.datetime.strptime(d_val, "%Y-%m-%d")
+                except ValueError:
+                    self.show_popup("Notice", "Date must be YYYY-MM-DD (e.g. 2026-10-02).")
+                    return
+                for h in holidays_list:
+                    if h.get("date") == d_val:
+                        h["name"] = n_val
+                        in_hol_name.text = ""
+                        _refresh_hol_ui()
+                        self.show_popup("Updated", f"Updated holiday for {d_val}.")
+                        return
+                holidays_list.append({"date": d_val, "name": n_val})
+                in_hol_name.text = ""
+                _refresh_hol_ui()
+
+            def _do_load_indian(b):
+                if 'STANDARD_HOLIDAYS_2026' in globals():
+                    existing = {h.get("date") for h in holidays_list}
+                    added = 0
+                    for sh in STANDARD_HOLIDAYS_2026:
+                        if sh.get("date") not in existing:
+                            holidays_list.append(sh.copy())
+                            added += 1
+                    _refresh_hol_ui()
+                    self.show_popup("Holidays Loaded", f"Loaded {added} standard Indian holidays for 2026!")
+
+            btn_add_hol.bind(on_release=_do_add_hol)
+            btn_load_ind.bind(on_release=_do_load_indian)
+
+            lbl_h_count = Label(
+                text=f"[b]Configured Holidays ({len(holidays_list)}):[/b]",
+                markup=True,
+                font_size='13sp',
+                color=get_color_from_hex("#38bdf8"),
+                size_hint_y=None,
+                height=dp(26),
+                halign='left',
+                valign='middle'
+            )
+            lbl_h_count.bind(size=lbl_h_count.setter('text_size'))
+            content_container.add_widget(lbl_h_count)
+            content_container.add_widget(hol_list_box)
+
+            # Sync to monthly sheet action
+            btn_sync_sheet = Button(
+                text="Sync Holidays & Weekly Offs to Sheet",
+                font_size='12sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(40),
+                background_normal='',
+                background_color=get_color_from_hex("#7c3aed")
+            )
+            def _do_sync_sheet(b):
+                if 'sync_month_holidays_and_weekly_offs' in globals():
+                    try:
+                        h_c, o_c, s_n = sync_month_holidays_and_weekly_offs(getattr(self, 'current_month', None))
+                        self.show_popup("Sync Complete", f"Sheet '{s_n}' updated:\n• Added Holidays: {h_c}\n• Added Weekly Offs: {o_c}")
+                    except Exception as ex:
+                        self.show_popup("Error", f"Failed to sync to sheet: {ex}")
+                else:
+                    self.show_popup("Notice", "Sheet sync function not available.")
+            btn_sync_sheet.bind(on_release=_do_sync_sheet)
+            content_container.add_widget(btn_sync_sheet)
+
+            _refresh_hol_ui()
+
+        def _build_data_api_tab():
+            content_container.clear_widgets()
+
+            content_container.add_widget(self._create_field_label("API / Webhook URL Endpoint:"))
+            content_container.add_widget(in_api_url)
+
+            content_container.add_widget(self._create_field_label("Bearer Token / Secret API Key:"))
+            content_container.add_widget(in_api_token)
+
+            btn_test_api = Button(
+                text="Send Test Ping to API",
+                font_size='12sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(40),
+                background_normal='',
+                background_color=get_color_from_hex("#0284c7")
+            )
+            def _do_test_api(b):
+                u = in_api_url.text.strip()
+                if not u:
+                    self.show_popup("Notice", "Please enter an API URL first.")
+                    return
+                b.text = "Pinging API..."
+                b.disabled = True
+                def _thread_api():
+                    tok = in_api_token.text.strip()
+                    payload = {
+                        "event": "test_ping",
+                        "action": "ping",
+                        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                        "user_name": in_user_name.text.strip() or "Developer",
+                        "message": "Connection test from WorkPulse Mobile",
+                        "client_version": "2.0"
+                    }
+                    if 'send_data_api_webhook' in globals():
+                        ok, msg, code = send_data_api_webhook(payload, api_url=u, auth_token=tok)
+                        def _res(dt):
+                            b.text = "Send Test Ping to API"
+                            b.disabled = False
+                            self.show_popup("API Connection Result", f"{'SUCCESS' if ok else 'FAILED'}\n\n• Code: {code}\n• Response:\n{msg}")
+                        Clock.schedule_once(_res, 0)
+                    else:
+                        def _err(dt):
+                            b.text = "Send Test Ping to API"
+                            b.disabled = False
+                            self.show_popup("Notice", "Data API sender function not found.")
+                        Clock.schedule_once(_err, 0)
+                threading.Thread(target=_thread_api, daemon=True).start()
+            btn_test_api.bind(on_release=_do_test_api)
+            content_container.add_widget(btn_test_api)
+
+            content_container.add_widget(self._create_field_label("Automatic Real-Time Webhook Triggers:"))
+            content_container.add_widget(_make_toggle("Send on Task Edit / Update", "api_edit", on_color="#059669"))
+            content_container.add_widget(_make_toggle("Send on Task Create / Save", "api_create", on_color="#0284c7"))
+            content_container.add_widget(_make_toggle("Send on Task Delete", "api_delete", on_color="#ef4444"))
+
+        def _build_gsheet_tab():
+            content_container.clear_widgets()
+
+            content_container.add_widget(self._create_field_label("Google Sheet Web App URL:"))
+            content_container.add_widget(in_gsheet_url)
+
+            btn_test_gs = Button(
+                text="Test Sheet Connection",
+                font_size='12sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(40),
+                background_normal='',
+                background_color=get_color_from_hex("#0284c7")
+            )
+            def _do_test_gs(b):
+                u = in_gsheet_url.text.strip()
+                if not u:
+                    self.show_popup("Notice", "Please enter a Google Sheet Web App URL first.")
+                    return
+                b.text = "Connecting..."
+                b.disabled = True
+                def _thread_gs():
+                    if 'ping_google_sheet' in globals():
+                        ok, data = ping_google_sheet(u)
+                        def _res(dt):
+                            b.text = "Test Sheet Connection"
+                            b.disabled = False
+                            if ok:
+                                title = data.get("title", "Google Sheet") if isinstance(data, dict) else "Connected"
+                                self.show_popup("Connection Successful", f"Connected to Google Sheet!\n\nSpreadsheet: '{title}'")
+                            else:
+                                err = data if isinstance(data, str) else str(data)
+                                self.show_popup("Connection Failed", f"Could not reach Google Sheet:\n\n{err}")
+                        Clock.schedule_once(_res, 0)
+                    else:
+                        def _err(dt):
+                            b.text = "Test Sheet Connection"
+                            b.disabled = False
+                            self.show_popup("Notice", "Google Sheet ping function not found.")
+                        Clock.schedule_once(_err, 0)
+                threading.Thread(target=_thread_gs, daemon=True).start()
+            btn_test_gs.bind(on_release=_do_test_gs)
+            content_container.add_widget(btn_test_gs)
+
+            content_container.add_widget(self._create_field_label("Synchronization Preferences:"))
+            content_container.add_widget(_make_toggle("Auto-Sync on Save", "gsheet_sync", on_color="#059669"))
+            content_container.add_widget(_make_toggle("Startup Fetch Priority", "gsheet_fetch", on_color="#0284c7"))
+
+            # Direct sync & fetch buttons
+            row_gs_acts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(6))
+            btn_sync_now = Button(
+                text="Sync Month Now",
+                font_size='12sp',
+                bold=True,
+                size_hint_x=0.5,
+                background_normal='',
+                background_color=get_color_from_hex("#059669")
+            )
+            def _do_sync_now(b):
+                u = in_gsheet_url.text.strip()
+                if not u:
+                    self.show_popup("Notice", "Please configure Google Sheet Web App URL first.")
+                    return
+                b.text = "Syncing..."
+                b.disabled = True
+                def _thread_sync():
+                    if 'sync_google_sheet_month' in globals():
+                        ok, msg = sync_google_sheet_month(getattr(self, 'current_month', None), webapp_url=u)
+                        def _res(dt):
+                            b.text = "Sync Month Now"
+                            b.disabled = False
+                            self.show_popup("Sheet Sync", f"{'SUCCESS' if ok else 'FAILED'}:\n\n{msg}")
+                        Clock.schedule_once(_res, 0)
+                threading.Thread(target=_thread_sync, daemon=True).start()
+            btn_sync_now.bind(on_release=_do_sync_now)
+            row_gs_acts.add_widget(btn_sync_now)
+
+            btn_fetch_now = Button(
+                text="Fetch from Sheet",
+                font_size='12sp',
+                bold=True,
+                size_hint_x=0.5,
+                background_normal='',
+                background_color=get_color_from_hex("#2563eb")
+            )
+            def _do_fetch_now(b):
+                if hasattr(self, 'fetch_google_sheet_data_async'):
+                    self.fetch_google_sheet_data_async()
+                    self.show_popup("Fetching Data", "Fetching latest records from Google Sheet in background...")
+            btn_fetch_now.bind(on_release=_do_fetch_now)
+            row_gs_acts.add_widget(btn_fetch_now)
+            content_container.add_widget(row_gs_acts)
+
+        def _build_reminders_tab():
+            content_container.clear_widgets()
+
+            content_container.add_widget(self._create_field_label("Scheduler System Controls:"))
+            content_container.add_widget(_make_toggle("Reminders System", "rem_enabled", on_color="#2563eb", on_text="ENABLED", off_text="DISABLED"))
+            content_container.add_widget(_make_toggle("Play Audio Chime Sound", "rem_sound", on_color="#7c3aed"))
+            content_container.add_widget(_make_toggle("Show System Notifications", "rem_notify", on_color="#059669"))
+            content_container.add_widget(_make_toggle("Daily Shift Alerts (Login, Lunch, Tea, Standup)", "rem_daily", on_color="#0f766e"))
+            content_container.add_widget(_make_toggle("Skip Alerts on Weekends & Holidays", "rem_skip", on_color="#d97706", on_text="YES", off_text="NO"))
+
+            btn_test_alert = Button(
+                text="Test Alert Now (Ringtone & Notification)",
+                font_size='13sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(44),
+                background_normal='',
+                background_color=get_color_from_hex("#7c3aed")
+            )
+            btn_test_alert.bind(on_release=lambda x: self.test_alert_now())
+            content_container.add_widget(btn_test_alert)
+
+        tab_builders = [
+            _build_general_tab,
+            _build_holidays_tab,
+            _build_data_api_tab,
+            _build_gsheet_tab,
+            _build_reminders_tab
+        ]
+
+        def _switch_tab(idx):
+            active_tab_idx[0] = idx
+            for i, b in enumerate(tab_buttons):
+                if i == idx:
+                    b.background_color = get_color_from_hex(tab_names[i][1])
+                    b.color = (1, 1, 1, 1)
+                else:
+                    b.background_color = get_color_from_hex("#1e293b")
+                    b.color = get_color_from_hex("#94a3b8")
+            tab_builders[idx]()
+            content_scroll.scroll_y = 1.0
+
+        for idx, (t_name, t_color) in enumerate(tab_names):
+            t_btn = Button(
+                text=t_name,
+                font_size='12sp',
+                bold=True,
+                size_hint_x=None,
+                height=dp(38),
+                background_normal='',
+                background_color=get_color_from_hex(t_color if idx == 0 else "#1e293b"),
+                color=(1, 1, 1, 1) if idx == 0 else get_color_from_hex("#94a3b8"),
+                padding=[dp(12), dp(6)]
+            )
+            t_btn.width = dp(max(100, len(t_name) * 8 + 24))
+            def _on_tab_click(b, i=idx):
+                _switch_tab(i)
+            t_btn.bind(on_release=_on_tab_click)
+            tab_buttons.append(t_btn)
+            tab_bar.add_widget(t_btn)
+
+        # Bottom Action Bar
+        bottom_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), spacing=dp(8))
         
-        btn_tog_sync = Button(
-            text=f"Auto-Sync: {'ON' if is_auto_sync else 'OFF'}",
-            font_size='12sp',
-            bold=True,
-            size_hint_x=0.5,
+        btn_cancel = Button(
+            text="Cancel",
+            font_size='13sp',
+            size_hint_x=0.35,
             background_normal='',
-            background_color=get_color_from_hex("#059669" if is_auto_sync else "#475569")
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
         )
-        def _tog_sync(x):
-            nonlocal is_auto_sync
-            is_auto_sync = not is_auto_sync
-            btn_tog_sync.text = f"Auto-Sync: {'ON' if is_auto_sync else 'OFF'}"
-            btn_tog_sync.background_color = get_color_from_hex("#059669" if is_auto_sync else "#475569")
-        btn_tog_sync.bind(on_release=_tog_sync)
-        row_gs_opts.add_widget(btn_tog_sync)
+        bottom_bar.add_widget(btn_cancel)
 
-        btn_tog_fetch = Button(
-            text=f"Startup Fetch: {'ON' if is_fetch_pri else 'OFF'}",
-            font_size='12sp',
+        btn_save = Button(
+            text="Save All Settings",
+            font_size='14sp',
             bold=True,
-            size_hint_x=0.5,
+            size_hint_x=0.65,
             background_normal='',
-            background_color=get_color_from_hex("#0284c7" if is_fetch_pri else "#475569")
+            background_color=get_color_from_hex("#16a34a"),
+            color=(1, 1, 1, 1)
         )
-        def _tog_fetch(x):
-            nonlocal is_fetch_pri
-            is_fetch_pri = not is_fetch_pri
-            btn_tog_fetch.text = f"Startup Fetch: {'ON' if is_fetch_pri else 'OFF'}"
-            btn_tog_fetch.background_color = get_color_from_hex("#0284c7" if is_fetch_pri else "#475569")
-        btn_tog_fetch.bind(on_release=_tog_fetch)
-        row_gs_opts.add_widget(btn_tog_fetch)
-        form.add_widget(row_gs_opts)
+        bottom_bar.add_widget(btn_save)
+        root_box.add_widget(bottom_bar)
 
-        # 4. Alerts & Reminders Settings
-        form.add_widget(self._create_field_label("Alerts & Reminders:"))
-        is_daily_on = settings.get("daily_shift_reminders_enabled", True)
-        is_sound_on = settings.get("reminder_sound", True)
-
-        row_al_opts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
-        btn_tog_daily = Button(
-            text=f"Shift Alerts: {'ON' if is_daily_on else 'OFF'}",
-            font_size='12sp',
-            bold=True,
-            size_hint_x=0.5,
-            background_normal='',
-            background_color=get_color_from_hex("#0f766e" if is_daily_on else "#475569")
+        popup = Popup(
+            title="",
+            separator_height=0,
+            content=root_box,
+            size_hint=(0.96, 0.94),
+            auto_dismiss=False
         )
-        def _tog_daily(x):
-            nonlocal is_daily_on
-            is_daily_on = not is_daily_on
-            btn_tog_daily.text = f"Shift Alerts: {'ON' if is_daily_on else 'OFF'}"
-            btn_tog_daily.background_color = get_color_from_hex("#0f766e" if is_daily_on else "#475569")
-        btn_tog_daily.bind(on_release=_tog_daily)
-        row_al_opts.add_widget(btn_tog_daily)
+        btn_close_x.bind(on_release=popup.dismiss)
+        btn_cancel.bind(on_release=popup.dismiss)
 
-        btn_tog_sound = Button(
-            text=f"Chime Sound: {'ON' if is_sound_on else 'OFF'}",
-            font_size='12sp',
-            bold=True,
-            size_hint_x=0.5,
-            background_normal='',
-            background_color=get_color_from_hex("#7c3aed" if is_sound_on else "#475569")
-        )
-        def _tog_sound(x):
-            nonlocal is_sound_on
-            is_sound_on = not is_sound_on
-            btn_tog_sound.text = f"Chime Sound: {'ON' if is_sound_on else 'OFF'}"
-            btn_tog_sound.background_color = get_color_from_hex("#7c3aed" if is_sound_on else "#475569")
-        btn_tog_sound.bind(on_release=_tog_sound)
-        row_al_opts.add_widget(btn_tog_sound)
-        form.add_widget(row_al_opts)
-
-        scroll.add_widget(form)
-
-        # Bottom Action Buttons Row
-        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), spacing=dp(8))
-        root_box = BoxLayout(orientation='vertical', padding=dp(6), spacing=dp(8))
-        root_box.add_widget(scroll)
-        root_box.add_widget(btn_row)
-
-        popup = Popup(title="WorkPulse Settings", content=root_box, size_hint=(0.94, 0.90))
-
-        def _do_save_settings(x):
+        def _do_save_all(b):
             new_name = in_user_name.text.strip() or "Developer"
             new_proj = in_def_proj.text.strip() or "General Work"
             new_login = in_login_t.text.strip() or "10:00 AM"
-            new_logout = in_logout_t.text.strip() or "07:00 PM"
-            new_url = in_gsheet_url.text.strip()
+            new_logout = in_logout_t.text.strip() or "07:30 PM"
+            new_lunch = in_lunch.text.strip() or "01:00 PM - 02:00 PM"
+            new_tea = in_tea.text.strip() or "04:30 PM - 04:45 PM"
+            new_wh_url = in_webhook_url.text.strip()
+            new_api_url = in_api_url.text.strip()
+            new_api_token = in_api_token.text.strip()
+            new_gs_url = in_gsheet_url.text.strip()
 
-            settings["user_name"] = new_name
-            settings["default_project"] = new_proj
-            settings["default_login_time"] = new_login
-            settings["default_logout_time"] = new_logout
-            settings["gsheet_webapp_url"] = new_url
-            settings["gsheet_auto_sync"] = is_auto_sync
-            settings["gsheet_fetch_priority"] = is_fetch_pri
-            settings["daily_shift_reminders_enabled"] = is_daily_on
-            settings["reminder_sound"] = is_sound_on
+            settings.update({
+                "user_name": new_name,
+                "default_project": new_proj,
+                "default_login_time": new_login,
+                "default_logout_time": new_logout,
+                "default_lunch_break": new_lunch,
+                "default_tea_break": new_tea,
+                "webhook_type": state["platform"],
+                "webhook_url": new_wh_url,
+                "prompt_team_share_on_save": state["prompt_team_share"],
+                "auto_copy_on_save": state["auto_copy"],
+                "weekly_offs": list(weekly_offs),
+                "second_fourth_saturday": state["sec_fourth_sat"],
+                "holidays": holidays_list,
+                "data_api_url": new_api_url,
+                "data_api_token": new_api_token,
+                "data_api_sync_on_edit": state["api_edit"],
+                "data_api_sync_on_create": state["api_create"],
+                "data_api_sync_on_delete": state["api_delete"],
+                "gsheet_webapp_url": new_gs_url,
+                "gsheet_auto_sync": state["gsheet_sync"],
+                "gsheet_fetch_priority": state["gsheet_fetch"],
+                "reminders_enabled": state["rem_enabled"],
+                "reminder_sound": state["rem_sound"],
+                "reminder_desktop_notify": state["rem_notify"],
+                "daily_shift_reminders_enabled": state["rem_daily"],
+                "remind_skip_weekends_holidays": state["rem_skip"],
+            })
 
             if 'save_all_settings' in globals():
                 save_all_settings(settings)
@@ -2836,6 +3734,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.settings = settings
             if self.chat_engine:
                 self.chat_engine.user_name = new_name
+                if hasattr(self.chat_engine, 'update_profile'):
+                    self.chat_engine.update_profile(new_name)
 
             # Update default values in Work Update form
             if hasattr(self, 'in_proj') and self.in_proj:
@@ -2849,29 +3749,12 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     self.in_logout.text = new_logout
 
             popup.dismiss()
-            self.show_popup("Settings Saved", "Your settings have been updated and applied successfully!")
+            self.show_popup("Settings Saved", "All WorkPulse settings and shift configurations have been saved successfully!")
 
-        btn_save = Button(
-            text="💾 Save Settings",
-            font_size='14sp',
-            bold=True,
-            background_normal='',
-            background_color=get_color_from_hex("#2563eb"),
-            color=(1, 1, 1, 1)
-        )
-        btn_save.bind(on_release=_do_save_settings)
-        btn_row.add_widget(btn_save)
+        btn_save.bind(on_release=_do_save_all)
 
-        btn_close = Button(
-            text="Close",
-            font_size='14sp',
-            background_normal='',
-            background_color=get_color_from_hex("#475569"),
-            color=(1, 1, 1, 1)
-        )
-        btn_close.bind(on_release=popup.dismiss)
-        btn_row.add_widget(btn_close)
-
+        # Initial render of Tab 0
+        _build_general_tab()
         popup.open()
 
     # =========================================================================
