@@ -49,6 +49,12 @@ except (ImportError, Exception):
     def get_color_from_hex(hex_str):  # type: ignore
         return (1, 1, 1, 1)
 
+def safe_escape_markup(text):
+    """Escapes Kivy markup tags to prevent markup parsing errors with user text."""
+    if not isinstance(text, str):
+        text = str(text or "")
+    return text.replace("&", "&amp;").replace("[", "&bl;").replace("]", "&br;")
+
 try:
     from storage_config import is_android, get_storage_path, acquire_android_multicast_lock
 except Exception:
@@ -604,8 +610,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
     def add_message_bubble(self, msg):
         is_me = msg.get("is_me", False) or (self.chat_engine and msg.get("sender_id") == self.chat_engine.user_id)
         msg_type = msg.get("type", "text")
-        sender = msg.get("user_name", "Anonymous")
-        time_s = msg.get("time_str", "")
+        sender = safe_escape_markup(msg.get("user_name", "Anonymous"))
+        time_s = safe_escape_markup(msg.get("time_str", ""))
 
         bubble = BoxLayout(orientation='vertical', size_hint_y=None, padding=dp(8), spacing=dp(4))
         
@@ -623,24 +629,28 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         bubble.add_widget(sender_lbl)
 
         # Message Content
+        use_markup = False
         if msg_type == "work_update":
-            title = msg.get("title", "Daily Work Update")
+            title = safe_escape_markup(msg.get("title", "Daily Work Update"))
             tasks = msg.get("tasks", [])
-            task_lines = "\n".join([f"• {t.get('title', '')} ({t.get('hours', '')}h)" for t in tasks[:3]])
+            task_lines = "\n".join([f"• {safe_escape_markup(t.get('title', ''))} ({safe_escape_markup(t.get('hours', ''))}h)" for t in tasks[:3]])
             body_text = f"[b]{title}[/b]\n{task_lines}"
             body_color = "#e2e8f0"
+            use_markup = True
         elif msg_type == "file":
-            fn = msg.get("file_name", "file")
-            fs = msg.get("file_size_str", "")
+            fn = safe_escape_markup(msg.get("file_name", "file"))
+            fs = safe_escape_markup(msg.get("file_size_str", ""))
             body_text = f"[Shared File] {fn} ({fs})"
             body_color = "#93c5fd"
+            use_markup = False
         else:
             body_text = msg.get("text", "")
             body_color = "#ffffff"
+            use_markup = False
 
         content_lbl = Label(
             text=body_text,
-            markup=True,
+            markup=use_markup,
             font_size='14sp',
             color=get_color_from_hex(body_color),
             size_hint_y=None,
@@ -1116,9 +1126,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
     def show_popup(self, title, msg):
         content = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(10))
-        content.add_widget(Label(text=msg, font_size='14sp', color=(1, 1, 1, 1), halign='center'))
+        lbl = Label(text=str(msg), font_size='14sp', color=(1, 1, 1, 1), halign='center', valign='middle')
+        lbl.bind(width=lambda s, w: s.setter('text_size')(s, (w - dp(24), None)))
+        content.add_widget(lbl)
         btn = Button(text="OK", font_size='14sp', size_hint_y=None, height=dp(44), background_normal='', background_color=get_color_from_hex("#2563eb"))
-        popup = Popup(title=title, content=content, size_hint=(0.85, 0.38))
+        popup = Popup(title=str(title), content=content, size_hint=(0.85, 0.38))
         btn.bind(on_release=popup.dismiss)
         content.add_widget(btn)
         popup.open()
@@ -1187,7 +1199,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if not KIVY_AVAILABLE:
             return
         content = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(10))
-        content.add_widget(Label(text=f"[b]{title}[/b]\n\n{msg}", markup=True, font_size='15sp', color=(1, 1, 1, 1), halign='center'))
+        esc_title = safe_escape_markup(title)
+        esc_msg = safe_escape_markup(msg)
+        lbl = Label(text=f"[b]{esc_title}[/b]\n\n{esc_msg}", markup=True, font_size='15sp', color=(1, 1, 1, 1), halign='center')
+        lbl.bind(width=lambda s, w: s.setter('text_size')(s, (w - dp(24), None)))
+        content.add_widget(lbl)
 
         b_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(6))
         popup = Popup(title="WorkPulse Reminder Alert", content=content, size_hint=(0.88, 0.42), auto_dismiss=False)

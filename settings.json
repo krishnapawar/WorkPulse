@@ -244,6 +244,14 @@
             "tea": "-",
             "lunch_taken": true,
             "tea_taken": true
+        },
+        "2026-11-06": {
+            "login": "10:00 AM",
+            "logout": "07:00 PM",
+            "lunch": "",
+            "tea": "",
+            "lunch_taken": false,
+            "tea_taken": false
         }
     },
     "recent_teammates": [],
