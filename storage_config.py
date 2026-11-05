@@ -197,7 +197,6 @@ def show_android_notification(title, message):
         PendingIntent = autoclass('android.app.PendingIntent')
         NotificationManager = autoclass('android.app.NotificationManager')
         NotificationChannel = autoclass('android.app.NotificationChannel')
-        NotificationBuilder = autoclass('androidx.core.app.NotificationCompat$Builder')
         Build = autoclass('android.os.Build')
 
         activity = PythonActivity.mActivity
@@ -224,7 +223,18 @@ def show_android_notification(title, message):
 
         pending_intent = PendingIntent.getActivity(activity, 0, intent, flags)
 
-        builder = NotificationBuilder(activity, channel_id)
+        # Try androidx first, fallback to standard android.app.Notification.Builder
+        builder = None
+        try:
+            NotificationCompatBuilder = autoclass('androidx.core.app.NotificationCompat$Builder')
+            builder = NotificationCompatBuilder(activity, channel_id)
+        except Exception:
+            NativeBuilder = autoclass('android.app.Notification$Builder')
+            if Build.VERSION.SDK_INT >= 26:
+                builder = NativeBuilder(activity, channel_id)
+            else:
+                builder = NativeBuilder(activity)
+
         builder.setContentTitle(str(title))
         builder.setContentText(str(message))
         builder.setContentIntent(pending_intent)
@@ -237,6 +247,17 @@ def show_android_notification(title, message):
 
         notification_id = int(time.time() * 1000) % 100000
         notification_manager.notify(notification_id, builder.build())
+
+        # Play system notification ringtone & vibrate
+        try:
+            RingtoneManager = autoclass('android.media.RingtoneManager')
+            notification_uri = RingtoneManager.getDefaultUri(RingtoneManager.TYPE_NOTIFICATION)
+            r = RingtoneManager.getRingtone(activity.getApplicationContext(), notification_uri)
+            if r:
+                r.play()
+        except Exception:
+            pass
+
         return True
     except Exception as e:
         print(f"Notice: Could not post Android system notification: {e}")

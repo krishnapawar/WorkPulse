@@ -441,7 +441,7 @@ class ReminderSchedulerEngine:
                 self._perform_check()
             except Exception as e:
                 print(f"Error in scheduler tick: {e}")
-            self._stop_event.wait(10.0)
+            self._stop_event.wait(4.0)
 
     def _perform_check(self):
         settings = load_all_settings()

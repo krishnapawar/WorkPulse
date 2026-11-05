@@ -25,6 +25,7 @@ try:
     from kivy.uix.button import Button  # type: ignore
     from kivy.uix.spinner import Spinner  # type: ignore
     from kivy.uix.popup import Popup  # type: ignore
+    from kivy.uix.filechooser import FileChooserListView  # type: ignore
     from kivy.clock import Clock  # type: ignore
     from kivy.metrics import dp, sp  # type: ignore
     try:
@@ -56,11 +57,12 @@ def safe_escape_markup(text):
     return text.replace("&", "&amp;").replace("[", "&bl;").replace("]", "&br;")
 
 try:
-    from storage_config import is_android, get_storage_path, acquire_android_multicast_lock
+    from storage_config import is_android, get_storage_path, acquire_android_multicast_lock, show_android_notification
 except Exception:
     def is_android(): return False
     def get_storage_path(fn): return fn
     def acquire_android_multicast_lock(): return None
+    def show_android_notification(t, m): return False
 
 # Import backend business logic
 try:
@@ -70,7 +72,8 @@ try:
         get_daily_timings, save_daily_timings,
         format_date_only, FILE, sync_google_sheet_month,
         fetch_google_sheet_month, save_fetched_rows_to_excel,
-        fetch_and_load_month_data, init_file
+        fetch_and_load_month_data, init_file,
+        get_available_months, load_month_records, delete_work_update
     )
 except Exception as e:
     print(f"Warning: app.py import: {e}")
@@ -86,7 +89,7 @@ except Exception as e:
 
 try:
     from lan_chat import (
-        LANChatEngine, get_network_info, get_avatar_color, get_initials
+        LANChatEngine, get_network_info, get_avatar_color, get_initials, format_file_size
     )
 except Exception as e:
     print(f"Warning: lan_chat import: {e}")
@@ -94,6 +97,7 @@ except Exception as e:
     get_network_info = None
     get_avatar_color = None
     get_initials = None
+    def format_file_size(b): return f"{b} B"
 
 
 class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
@@ -102,21 +106,34 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if KIVY_AVAILABLE and hasattr(Window, 'clearcolor'):
             Window.clearcolor = get_color_from_hex("#0f172a")
 
+        # Soft keyboard setup: pan view above on-screen keyboard
+        if KIVY_AVAILABLE and hasattr(Window, 'softinput_mode'):
+            try:
+                Window.softinput_mode = "below_target"
+            except Exception:
+                pass
+        if KIVY_AVAILABLE and Window:
+            try:
+                Window.bind(on_keyboard_height=self._on_keyboard_height)
+            except Exception:
+                pass
+
         self.settings = load_settings() if 'load_settings' in globals() else {}
         self.chat_engine = None
         self.unread_chat_count = 0
+        self.rendered_msg_ids = set()
         self.current_tab = "work"
 
         # Main Root Container
         root = BoxLayout(orientation='vertical', padding=0, spacing=0)
 
         # 1. Top Header App Bar
-        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(52), padding=[dp(12), dp(6), dp(12), dp(6)], spacing=dp(8))
+        header = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(50), padding=[dp(12), dp(4), dp(12), dp(4)], spacing=dp(8))
         
         lbl_app = Label(
             text="[b]WorkPulse[/b] [color=#38bdf8]Mobile[/color]",
             markup=True,
-            font_size='19sp',
+            font_size='18sp',
             color=get_color_from_hex("#f8fafc"),
             size_hint_x=0.6,
             halign='left',
@@ -137,12 +154,12 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         header.add_widget(self.lbl_net_chip)
         root.add_widget(header)
 
-        # 2. Modern Navigation Tabs
-        nav_tabs = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), padding=[dp(8), 0, dp(8), dp(4)], spacing=dp(6))
+        # 2. Modern 4-Tab Navigation Bar
+        nav_tabs = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), padding=[dp(4), 0, dp(4), dp(4)], spacing=dp(4))
         
         self.btn_tab_work = Button(
-            text="Work Update",
-            font_size='14sp',
+            text="Log Work",
+            font_size='13sp',
             bold=True,
             background_normal='',
             background_color=get_color_from_hex("#2563eb"),
@@ -151,9 +168,20 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.btn_tab_work.bind(on_release=lambda x: self.switch_tab("work"))
         nav_tabs.add_widget(self.btn_tab_work)
 
+        self.btn_tab_updates = Button(
+            text="My Updates",
+            font_size='13sp',
+            bold=True,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            color=get_color_from_hex("#94a3b8")
+        )
+        self.btn_tab_updates.bind(on_release=lambda x: self.switch_tab("updates"))
+        nav_tabs.add_widget(self.btn_tab_updates)
+
         self.btn_tab_chat = Button(
             text="Team Chat",
-            font_size='14sp',
+            font_size='13sp',
             bold=True,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
@@ -164,7 +192,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         self.btn_tab_remind = Button(
             text="Reminders",
-            font_size='14sp',
+            font_size='13sp',
             bold=True,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
@@ -181,6 +209,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         # Build individual tab views
         self.view_work = self.build_work_view()
+        self.view_updates = self.build_history_view()
         self.view_chat = self.build_chat_view()
         self.view_remind = self.build_reminders_view()
 
@@ -192,6 +221,15 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         return root
 
+    def _on_keyboard_height(self, window, height):
+        if hasattr(self, 'chat_scroll') and self.chat_scroll and height > 0:
+            Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+
+    def _on_chat_input_focus(self, instance, value):
+        if value and hasattr(self, 'chat_scroll') and self.chat_scroll:
+            Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.1)
+            Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.3)
+
     def switch_tab(self, tab_name):
         self.current_tab = tab_name
         self.content_container.clear_widgets()
@@ -199,6 +237,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Reset button styling
         self.btn_tab_work.background_color = get_color_from_hex("#1e293b")
         self.btn_tab_work.color = get_color_from_hex("#94a3b8")
+        self.btn_tab_updates.background_color = get_color_from_hex("#1e293b")
+        self.btn_tab_updates.color = get_color_from_hex("#94a3b8")
         self.btn_tab_chat.background_color = get_color_from_hex("#1e293b")
         self.btn_tab_chat.color = get_color_from_hex("#94a3b8")
         self.btn_tab_remind.background_color = get_color_from_hex("#1e293b")
@@ -208,6 +248,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.btn_tab_work.background_color = get_color_from_hex("#2563eb")
             self.btn_tab_work.color = (1, 1, 1, 1)
             self.content_container.add_widget(self.view_work)
+        elif tab_name == "updates":
+            self.btn_tab_updates.background_color = get_color_from_hex("#2563eb")
+            self.btn_tab_updates.color = (1, 1, 1, 1)
+            self.content_container.add_widget(self.view_updates)
+            self.refresh_history_list()
         elif tab_name == "chat":
             self.btn_tab_chat.background_color = get_color_from_hex("#2563eb")
             self.btn_tab_chat.color = (1, 1, 1, 1)
@@ -445,30 +490,392 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         return lbl
 
     # =========================================================================
-    # TAB 2: LAN TEAM CHAT VIEW
+    # TAB 2: MY UPDATES / WORK LOGS HISTORY VIEW
+    # =========================================================================
+    def build_history_view(self):
+        root = BoxLayout(orientation='vertical', padding=[dp(10), dp(6), dp(10), dp(10)], spacing=dp(8))
+
+        # Top Control Row: Month Selector & Refresh
+        top_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), spacing=dp(8))
+        
+        months = get_available_months() if 'get_available_months' in globals() else []
+        current_m = datetime.datetime.now().strftime("%B %Y")
+        if not months:
+            months = [current_m]
+        elif current_m not in months:
+            months.insert(0, current_m)
+
+        self.sp_hist_month = Spinner(
+            text=current_m,
+            values=tuple(months),
+            font_size='14sp',
+            size_hint_x=0.72,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            color=(1, 1, 1, 1)
+        )
+        self.sp_hist_month.bind(text=lambda s, val: self.refresh_history_list())
+        top_row.add_widget(self.sp_hist_month)
+
+        btn_refresh = Button(
+            text="Refresh",
+            font_size='13sp',
+            bold=True,
+            size_hint_x=0.28,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        btn_refresh.bind(on_release=lambda x: self.refresh_history_list())
+        top_row.add_widget(btn_refresh)
+        root.add_widget(top_row)
+
+        # Summary Bar
+        self.lbl_hist_stats = Label(
+            text="Loading summary...",
+            font_size='13sp',
+            size_hint_y=None,
+            height=dp(26),
+            color=get_color_from_hex("#38bdf8"),
+            halign='left',
+            valign='middle'
+        )
+        self.lbl_hist_stats.bind(size=self.lbl_hist_stats.setter('text_size'))
+        root.add_widget(self.lbl_hist_stats)
+
+        # Search Bar
+        self.in_hist_search = TextInput(
+            hint_text="Search by task, project, status...",
+            multiline=False,
+            font_size='14sp',
+            size_hint_y=None,
+            height=dp(44),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            hint_text_color=get_color_from_hex("#64748b"),
+            padding=[dp(10), dp(10)]
+        )
+        self.in_hist_search.bind(text=lambda s, val: self.refresh_history_list())
+        root.add_widget(self.in_hist_search)
+
+        # Updates List ScrollView
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        self.hist_list_layout = GridLayout(cols=1, spacing=dp(8), size_hint_y=None, padding=[0, dp(4), 0, dp(12)])
+        self.hist_list_layout.bind(minimum_height=self.hist_list_layout.setter('height'))
+        scroll.add_widget(self.hist_list_layout)
+        root.add_widget(scroll)
+
+        return root
+
+    def refresh_history_list(self):
+        if not hasattr(self, 'hist_list_layout') or not self.hist_list_layout:
+            return
+        self.hist_list_layout.clear_widgets()
+
+        if 'get_available_months' in globals() and hasattr(self, 'sp_hist_month'):
+            months = get_available_months()
+            if months and tuple(months) != self.sp_hist_month.values:
+                cur = self.sp_hist_month.text
+                self.sp_hist_month.values = tuple(months)
+                if cur in months:
+                    self.sp_hist_month.text = cur
+                elif months:
+                    self.sp_hist_month.text = months[0]
+
+        target_m = self.sp_hist_month.text if hasattr(self, 'sp_hist_month') else datetime.datetime.now().strftime("%B %Y")
+        records = load_month_records(target_m) if 'load_month_records' in globals() else []
+
+        search_q = self.in_hist_search.text.strip().lower() if hasattr(self, 'in_hist_search') else ""
+        filtered = []
+        tot_hours = 0.0
+        comp_cnt = 0
+
+        for r in records:
+            t_title = str(r[3] or "")
+            t_proj = str(r[2] or "")
+            t_status = str(r[6] or "")
+            t_desc = str(r[4] or "")
+            t_hours_s = str(r[5] or "0").replace("h", "").strip()
+            try:
+                tot_hours += float(t_hours_s)
+            except Exception:
+                pass
+            if t_status.lower() == "completed":
+                comp_cnt += 1
+
+            if not search_q or search_q in t_title.lower() or search_q in t_proj.lower() or search_q in t_status.lower() or search_q in t_desc.lower():
+                filtered.append(r)
+
+        if hasattr(self, 'lbl_hist_stats'):
+            self.lbl_hist_stats.text = f"{len(records)} Tasks  |  {tot_hours:.1f} Total Hours  |  {comp_cnt} Completed"
+
+        if not filtered:
+            msg = "No work updates matching filter." if search_q else f"No updates logged for {target_m}.\nUse 'Log Work' tab to save tasks!"
+            lbl = Label(text=msg, font_size='14sp', color=get_color_from_hex("#64748b"), size_hint_y=None, height=dp(60), halign='center')
+            self.hist_list_layout.add_widget(lbl)
+            return
+
+        for r in filtered:
+            card = self._create_history_card(r, target_m)
+            self.hist_list_layout.add_widget(card)
+
+    def _create_history_card(self, r, sheet_name):
+        rec_id = r[0]
+        date_v = str(r[1] or "")
+        proj_v = str(r[2] or "General Work")
+        title_v = str(r[3] or "Untitled Task")
+        desc_v = str(r[4] or "")
+        hours_v = str(r[5] or "0")
+        status_v = str(r[6] or "Completed")
+        login_v = str(r[8] or "")
+        logout_v = str(r[9] or "")
+
+        card = BoxLayout(orientation='vertical', size_hint_y=None, padding=[dp(12), dp(10), dp(12), dp(10)], spacing=dp(5))
+        card.height = dp(144) if desc_v else dp(116)
+
+        # Row 1: Date & Project Pill
+        row1 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(22), spacing=dp(8))
+        lbl_date = Label(
+            text=f"[b]{date_v}[/b]",
+            markup=True,
+            font_size='13sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_x=0.45,
+            halign='left',
+            valign='middle'
+        )
+        lbl_date.bind(size=lbl_date.setter('text_size'))
+        row1.add_widget(lbl_date)
+
+        lbl_proj = Label(
+            text=f"[b]{safe_escape_markup(proj_v)}[/b]",
+            markup=True,
+            font_size='12sp',
+            color=get_color_from_hex("#c084fc"),
+            size_hint_x=0.55,
+            halign='right',
+            valign='middle'
+        )
+        lbl_proj.bind(size=lbl_proj.setter('text_size'))
+        row1.add_widget(lbl_proj)
+        card.add_widget(row1)
+
+        # Row 2: Title & Hours Badge
+        row2 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(26), spacing=dp(8))
+        lbl_title = Label(
+            text=f"[b]{safe_escape_markup(title_v)}[/b]",
+            markup=True,
+            font_size='15sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_x=0.76,
+            halign='left',
+            valign='middle'
+        )
+        lbl_title.bind(size=lbl_title.setter('text_size'))
+        row2.add_widget(lbl_title)
+
+        lbl_hours = Label(
+            text=f"[b]{hours_v}h[/b]",
+            markup=True,
+            font_size='14sp',
+            color=get_color_from_hex("#34d399"),
+            size_hint_x=0.24,
+            halign='right',
+            valign='middle'
+        )
+        lbl_hours.bind(size=lbl_hours.setter('text_size'))
+        row2.add_widget(lbl_hours)
+        card.add_widget(row2)
+
+        # Row 3: Shift Timings & Status Badge
+        row3 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(22), spacing=dp(8))
+        shift_txt = f"{login_v} - {logout_v}" if (login_v or logout_v) else "Shift: Standard"
+        lbl_shift = Label(
+            text=f"Shift: {shift_txt}",
+            font_size='12sp',
+            color=get_color_from_hex("#94a3b8"),
+            size_hint_x=0.62,
+            halign='left',
+            valign='middle'
+        )
+        lbl_shift.bind(size=lbl_shift.setter('text_size'))
+        row3.add_widget(lbl_shift)
+
+        st_colors = {
+            "completed": "#10b981",
+            "in progress": "#f59e0b",
+            "pending": "#eab308",
+            "leave": "#ec4899",
+            "weekly off": "#3b82f6",
+            "holiday": "#f97316"
+        }
+        st_c = st_colors.get(status_v.lower(), "#94a3b8")
+        lbl_st = Label(
+            text=f"[b]{status_v}[/b]",
+            markup=True,
+            font_size='12sp',
+            color=get_color_from_hex(st_c),
+            size_hint_x=0.38,
+            halign='right',
+            valign='middle'
+        )
+        lbl_st.bind(size=lbl_st.setter('text_size'))
+        row3.add_widget(lbl_st)
+        card.add_widget(row3)
+
+        # Row 4: Description preview
+        if desc_v:
+            desc_sub = (desc_v[:80] + "...") if len(desc_v) > 80 else desc_v
+            lbl_desc = Label(
+                text=safe_escape_markup(desc_sub),
+                font_size='12sp',
+                color=get_color_from_hex("#64748b"),
+                size_hint_y=None,
+                height=dp(20),
+                halign='left',
+                valign='middle'
+            )
+            lbl_desc.bind(size=lbl_desc.setter('text_size'))
+            card.add_widget(lbl_desc)
+
+        # Row 5: Action Buttons (View Details, Delete)
+        row_acts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(6))
+        btn_view = Button(
+            text="View Details",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.6,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_view.bind(on_release=lambda x, rec=r: self.view_update_details(rec))
+        row_acts.add_widget(btn_view)
+
+        btn_del = Button(
+            text="Delete",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.4,
+            background_normal='',
+            background_color=get_color_from_hex("#dc2626"),
+            color=(1, 1, 1, 1)
+        )
+        btn_del.bind(on_release=lambda x, rid=rec_id, sm=sheet_name: self.delete_update_item(rid, sm))
+        row_acts.add_widget(btn_del)
+        card.add_widget(row_acts)
+
+        return card
+
+    def view_update_details(self, r):
+        content = BoxLayout(orientation='vertical', padding=dp(14), spacing=dp(8))
+        
+        d_v = str(r[1] or "")
+        p_v = str(r[2] or "")
+        t_v = str(r[3] or "")
+        desc_v = str(r[4] or "No description provided.")
+        h_v = str(r[5] or "")
+        st_v = str(r[6] or "")
+        rem_v = str(r[7] or "")
+        login_v = str(r[8] or "")
+        logout_v = str(r[9] or "")
+        created_v = str(r[12] or "")
+
+        details_text = (
+            f"[b]Task:[/b] {safe_escape_markup(t_v)}\n"
+            f"[b]Date:[/b] {d_v}   |   [b]Project:[/b] {safe_escape_markup(p_v)}\n"
+            f"[b]Hours:[/b] {h_v}h   |   [b]Status:[/b] {st_v}\n"
+            f"[b]Timings:[/b] {login_v} - {logout_v}\n"
+            f"[b]Logged At:[/b] {created_v}\n\n"
+            f"[b]Description / Notes:[/b]\n{safe_escape_markup(desc_v)}"
+        )
+        if rem_v:
+            details_text += f"\n\n[b]Remarks:[/b] {safe_escape_markup(rem_v)}"
+
+        lbl = Label(
+            text=details_text,
+            markup=True,
+            font_size='13sp',
+            color=(1, 1, 1, 1),
+            halign='left',
+            valign='top'
+        )
+        lbl.bind(width=lambda s, w: s.setter('text_size')(s, (w, None)))
+        scroll = ScrollView(size_hint=(1, 1))
+        scroll.add_widget(lbl)
+        content.add_widget(scroll)
+
+        btn_ok = Button(text="Close", font_size='14sp', size_hint_y=None, height=dp(42), background_normal='', background_color=get_color_from_hex("#2563eb"))
+        popup = Popup(title="Work Update Details", content=content, size_hint=(0.88, 0.65))
+        btn_ok.bind(on_release=popup.dismiss)
+        content.add_widget(btn_ok)
+        popup.open()
+
+    def delete_update_item(self, record_id, sheet_name):
+        content = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(10))
+        content.add_widget(Label(text="Are you sure you want to delete this work update?", font_size='14sp', color=(1, 1, 1, 1), halign='center'))
+        
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(title="Confirm Deletion", content=content, size_hint=(0.85, 0.35))
+        
+        def _do_del(x):
+            popup.dismiss()
+            if 'delete_work_update' in globals():
+                ok = delete_work_update(record_id, sheet_name)
+                if ok:
+                    self.refresh_history_list()
+                    self.show_popup("Deleted", "Task record removed successfully!")
+                else:
+                    self.show_popup("Error", "Could not delete record.")
+        
+        btn_confirm = Button(text="Delete", background_color=get_color_from_hex("#dc2626"), bold=True)
+        btn_confirm.bind(on_release=_do_del)
+        btn_cancel = Button(text="Cancel", background_color=get_color_from_hex("#475569"))
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_row.add_widget(btn_confirm)
+        btn_row.add_widget(btn_cancel)
+        content.add_widget(btn_row)
+        
+        popup.open()
+
+    # =========================================================================
+    # TAB 3: LAN TEAM CHAT VIEW
     # =========================================================================
     def build_chat_view(self):
         container = BoxLayout(orientation='vertical', padding=0, spacing=0)
 
         # Chat Header Status Card
-        chat_top = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), padding=[dp(10), dp(4), dp(10), dp(4)], spacing=dp(8))
+        chat_top = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), padding=[dp(8), dp(4), dp(8), dp(4)], spacing=dp(6))
         
         self.lbl_chat_status = Label(
             text="Connecting to LAN...",
-            font_size='12sp',
+            font_size='11sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.38,
+            size_hint_x=0.32,
             halign='left',
             valign='middle'
         )
         self.lbl_chat_status.bind(size=self.lbl_chat_status.setter('text_size'))
         chat_top.add_widget(self.lbl_chat_status)
 
-        btn_share_task = Button(
-            text="Share Tasks",
+        btn_share_file = Button(
+            text="Send File",
             font_size='12sp',
             bold=True,
-            size_hint_x=0.24,
+            size_hint_x=0.22,
+            background_normal='',
+            background_color=get_color_from_hex("#059669"),
+            color=(1, 1, 1, 1)
+        )
+        btn_share_file.bind(on_release=self.open_file_picker_popup)
+        chat_top.add_widget(btn_share_file)
+
+        btn_share_task = Button(
+            text="Tasks",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.18,
             background_normal='',
             background_color=get_color_from_hex("#8b5cf6"),
             color=(1, 1, 1, 1)
@@ -480,7 +887,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="+ IP",
             font_size='12sp',
             bold=True,
-            size_hint_x=0.18,
+            size_hint_x=0.14,
             background_normal='',
             background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
@@ -492,7 +899,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="Rescan",
             font_size='12sp',
             bold=True,
-            size_hint_x=0.20,
+            size_hint_x=0.14,
             background_normal='',
             background_color=get_color_from_hex("#0284c7"),
             color=(1, 1, 1, 1)
@@ -509,14 +916,25 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.chat_scroll.add_widget(self.chat_list_layout)
         container.add_widget(self.chat_scroll)
 
-        # Chat Input Bottom Bar
-        chat_input_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(54), padding=[dp(8), dp(4), dp(8), dp(6)], spacing=dp(6))
+        # Chat Input Bottom Bar (with soft-keyboard lift support)
+        self.chat_input_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(54), padding=[dp(6), dp(4), dp(6), dp(6)], spacing=dp(6))
         
+        btn_attach = Button(
+            text="📎",
+            font_size='18sp',
+            size_hint_x=0.14,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_attach.bind(on_release=self.open_file_picker_popup)
+        self.chat_input_bar.add_widget(btn_attach)
+
         self.in_chat_msg = TextInput(
             hint_text="Type a message to team...",
             multiline=False,
             font_size='15sp',
-            size_hint_x=0.78,
+            size_hint_x=0.66,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
             foreground_color=(1, 1, 1, 1),
@@ -524,21 +942,22 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             padding=[dp(10), dp(12)]
         )
         self.in_chat_msg.bind(on_text_validate=self.send_chat_message)
-        chat_input_bar.add_widget(self.in_chat_msg)
+        self.in_chat_msg.bind(focus=self._on_chat_input_focus)
+        self.chat_input_bar.add_widget(self.in_chat_msg)
 
         btn_send = Button(
             text="Send",
             font_size='15sp',
             bold=True,
-            size_hint_x=0.22,
+            size_hint_x=0.20,
             background_normal='',
             background_color=get_color_from_hex("#2563eb"),
             color=(1, 1, 1, 1)
         )
         btn_send.bind(on_release=self.send_chat_message)
-        chat_input_bar.add_widget(btn_send)
+        self.chat_input_bar.add_widget(btn_send)
 
-        container.add_widget(chat_input_bar)
+        container.add_widget(self.chat_input_bar)
         return container
 
     def init_lan_chat_engine(self):
@@ -604,10 +1023,17 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if not self.chat_engine:
             return
         self.chat_list_layout.clear_widgets()
+        self.rendered_msg_ids.clear()
         for msg in self.chat_engine.messages[-60:]:
             self.add_message_bubble(msg)
 
     def add_message_bubble(self, msg):
+        msg_id = msg.get("id")
+        if msg_id:
+            if msg_id in self.rendered_msg_ids:
+                return
+            self.rendered_msg_ids.add(msg_id)
+
         is_me = msg.get("is_me", False) or (self.chat_engine and msg.get("sender_id") == self.chat_engine.user_id)
         msg_type = msg.get("type", "text")
         sender = safe_escape_markup(msg.get("user_name", "Anonymous"))
@@ -630,6 +1056,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         # Message Content
         use_markup = False
+        btn_action = None
         if msg_type == "work_update":
             title = safe_escape_markup(msg.get("title", "Daily Work Update"))
             tasks = msg.get("tasks", [])
@@ -640,9 +1067,21 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         elif msg_type == "file":
             fn = safe_escape_markup(msg.get("file_name", "file"))
             fs = safe_escape_markup(msg.get("file_size_str", ""))
-            body_text = f"[Shared File] {fn} ({fs})"
+            body_text = f"[b]Shared File:[/b] {fn} ({fs})"
             body_color = "#93c5fd"
-            use_markup = False
+            use_markup = True
+            if not is_me:
+                btn_action = Button(
+                    text=f"⬇ Download ({msg.get('file_size_str', '')})",
+                    font_size='12sp',
+                    bold=True,
+                    size_hint_y=None,
+                    height=dp(34),
+                    background_normal='',
+                    background_color=get_color_from_hex("#0284c7"),
+                    color=(1, 1, 1, 1)
+                )
+                btn_action.bind(on_release=lambda x, m=msg: self.download_chat_file(m))
         else:
             body_text = msg.get("text", "")
             body_color = "#ffffff"
@@ -660,7 +1099,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         content_lbl.bind(texture_size=lambda s, ts: setattr(s, 'height', max(dp(24), ts[1])))
         bubble.add_widget(content_lbl)
 
-        bubble.height = dp(24) + content_lbl.height + dp(10)
+        if btn_action:
+            bubble.add_widget(btn_action)
+            bubble.height = dp(24) + content_lbl.height + dp(40)
+        else:
+            bubble.height = dp(24) + content_lbl.height + dp(10)
         self.chat_list_layout.add_widget(bubble)
 
     def scroll_chat_to_bottom(self):
@@ -677,8 +1120,123 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             elif hasattr(self.chat_engine, "send_broadcast_message"):
                 self.chat_engine.send_broadcast_message(text)
             self.in_chat_msg.text = ""
-            self.refresh_chat_messages_ui()
             Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+
+    def open_file_picker_popup(self, *args):
+        if not self.chat_engine:
+            self.show_popup("Notice", "LAN Chat is not initialized.")
+            return
+
+        start_dir = "/sdcard/Download" if (is_android() and os.path.isdir("/sdcard/Download")) else (
+            "/sdcard" if (is_android() and os.path.isdir("/sdcard")) else os.path.expanduser("~")
+        )
+
+        content = BoxLayout(orientation='vertical', padding=dp(8), spacing=dp(8))
+        lbl_info = Label(
+            text="[b]Select File to Share on LAN[/b]",
+            markup=True,
+            font_size='14sp',
+            size_hint_y=None,
+            height=dp(26),
+            color=get_color_from_hex("#38bdf8")
+        )
+        content.add_widget(lbl_info)
+
+        filechooser = FileChooserListView(
+            path=start_dir,
+            size_hint=(1, 1),
+            filters=['*.*']
+        )
+        content.add_widget(filechooser)
+
+        lbl_selected = Label(
+            text="Tap a file to select",
+            font_size='12sp',
+            size_hint_y=None,
+            height=dp(24),
+            color=get_color_from_hex("#94a3b8"),
+            halign='left',
+            valign='middle'
+        )
+        lbl_selected.bind(size=lbl_selected.setter('text_size'))
+        content.add_widget(lbl_selected)
+
+        def _on_selection_change(chooser, selection):
+            if selection:
+                lbl_selected.text = f"Selected: {os.path.basename(selection[0])}"
+
+        filechooser.bind(selection=_on_selection_change)
+
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+        popup = Popup(title="Share File with Team", content=content, size_hint=(0.94, 0.82))
+
+        def _do_send_file(x):
+            sel = filechooser.selection
+            if not sel or not os.path.isfile(sel[0]):
+                self.show_popup("Notice", "Please select a file to send.")
+                return
+            chosen_file = sel[0]
+            popup.dismiss()
+            try:
+                msg_obj = self.chat_engine.send_file(chosen_file)
+                if msg_obj:
+                    self.show_popup("File Shared", f"File '{os.path.basename(chosen_file)}' broadcast to LAN team!")
+                    Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+                else:
+                    self.show_popup("Error", "Could not send file.")
+            except Exception as e:
+                self.show_popup("Error", f"File sending failed: {e}")
+
+        btn_send = Button(
+            text="Send File",
+            background_normal='',
+            background_color=get_color_from_hex("#059669"),
+            bold=True
+        )
+        btn_send.bind(on_release=_do_send_file)
+
+        btn_cancel = Button(
+            text="Cancel",
+            background_normal='',
+            background_color=get_color_from_hex("#475569")
+        )
+        btn_cancel.bind(on_release=popup.dismiss)
+
+        btn_row.add_widget(btn_send)
+        btn_row.add_widget(btn_cancel)
+        content.add_widget(btn_row)
+
+        popup.open()
+
+    def download_chat_file(self, msg):
+        if not self.chat_engine:
+            self.show_popup("Notice", "LAN Chat engine is not active.")
+            return
+
+        file_name = msg.get("file_name", "downloaded_file")
+        target_dir = "/sdcard/Download" if (is_android() and os.path.isdir("/sdcard/Download")) else (
+            "/sdcard" if (is_android() and os.path.isdir("/sdcard")) else os.path.join(os.path.expanduser("~"), "Downloads")
+        )
+        if not os.path.exists(target_dir):
+            try:
+                os.makedirs(target_dir, exist_ok=True)
+            except Exception:
+                pass
+
+        self.show_popup("Downloading", f"Downloading {file_name} from peer...")
+
+        def _on_done(saved_path):
+            Clock.schedule_once(lambda dt: self.show_popup("Download Complete", f"Saved to:\n{saved_path}"), 0)
+
+        def _on_err(err_msg):
+            Clock.schedule_once(lambda dt: self.show_popup("Download Failed", f"Error: {err_msg}"), 0)
+
+        self.chat_engine.download_file(
+            msg,
+            target_dir=target_dir,
+            on_done=_on_done,
+            on_error=_on_err
+        )
 
     def share_today_tasks_to_chat(self, *args):
         if not self.chat_engine:
@@ -875,6 +1433,20 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.btn_toggle_daily.bind(on_release=self.toggle_daily_alerts)
         content.add_widget(self.btn_toggle_daily)
 
+        # Immediate Test Alert Button
+        btn_test_alert = Button(
+            text="🔔 Test Alert Now (Ringtone & Notification)",
+            font_size='14sp',
+            bold=True,
+            size_hint_y=None,
+            height=dp(46),
+            background_normal='',
+            background_color=get_color_from_hex("#7c3aed"),
+            color=(1, 1, 1, 1)
+        )
+        btn_test_alert.bind(on_release=self.test_alert_now)
+        content.add_widget(btn_test_alert)
+
         # Active Scheduled Reminders List
         content.add_widget(self._create_field_label("Active Schedules:"))
         self.rem_list_box = GridLayout(cols=1, spacing=dp(6), size_hint_y=None)
@@ -885,14 +1457,28 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         scroll.add_widget(content)
         return scroll
 
+    def test_alert_now(self, *args):
+        title = "WorkPulse Reminder Test"
+        msg = "Chime, notification and popup alert test! Your schedules are functioning properly."
+        if show_android_notification:
+            try:
+                show_android_notification(title, msg)
+            except Exception as e:
+                print(f"Test alert note: {e}")
+        self.show_reminder_alert(title, msg, item_type="custom", reminder_id=None)
+
     def apply_preset_mins(self, minutes):
         target = datetime.datetime.now() + datetime.timedelta(minutes=minutes)
         self.in_rem_date.text = target.strftime("%Y-%m-%d")
         self.in_rem_time.text = target.strftime("%I:%M %p")
+        if not self.in_rem_title.text.strip():
+            self.in_rem_title.text = f"Quick Reminder ({minutes}m)"
 
     def apply_preset_time(self, time_val):
         self.in_rem_date.text = datetime.date.today().strftime("%Y-%m-%d")
         self.in_rem_time.text = time_val
+        if not self.in_rem_title.text.strip():
+            self.in_rem_title.text = f"Shift Reminder ({time_val})"
 
     def save_schedule(self, *args):
         title = self.in_rem_title.text.strip()
@@ -909,8 +1495,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         repeat = rep_map.get(rep_val, "none")
 
         if not title:
-            self.show_popup("Notice", "Please enter a Reminder Title.")
-            return
+            title = f"Reminder ({time_v})"
+            self.in_rem_title.text = title
 
         if 'add_custom_reminder' in globals():
             try:
@@ -1033,6 +1619,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     fname = os.path.basename(FILE) if 'FILE' in globals() else "data.xlsx"
                     self.show_popup("Success", f"Task saved to {fname}!")
                     self.clear_form()
+                    if hasattr(self, 'refresh_history_list'):
+                        self.refresh_history_list()
                 else:
                     self.show_popup("Error", "Could not save task update. Please verify storage.")
 
@@ -1175,6 +1763,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Start Mobile Reminder Scheduler Engine
         if 'ReminderSchedulerEngine' in globals():
             def _on_mobile_trigger(item_type, title, message, reminder_id):
+                if show_android_notification:
+                    try:
+                        show_android_notification(title, message)
+                    except Exception as e:
+                        print(f"Android notification: {e}")
                 if KIVY_AVAILABLE and Clock:
                     Clock.schedule_once(lambda dt: self.show_reminder_alert(title, message, item_type, reminder_id))
             self.reminder_engine = ReminderSchedulerEngine(on_trigger_callback=_on_mobile_trigger)

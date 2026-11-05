@@ -63,6 +63,9 @@ android.archs = arm64-v8a, armeabi-v7a
 # (bool) Copy library instead of making a libpymodules.so
 android.copy_libs = 1
 
+# (str) The window softinput mode (resize, pan, nothing)
+android.softinput_mode = resize
+
 # (str) The format used to package the app for release mode (aab or apk)
 android.release_artifact = apk
 
