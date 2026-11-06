@@ -25,7 +25,7 @@ version = 1.0.0
 requirements = python3,kivy,sqlite3,openpyxl,requests,urllib3,et_xmlfile,pyjnius
 
 # (str) Presplash of the application
-presplash.filename = %(source.dir)s/assets/presplash.png
+presplash.filename = %(source.dir)s/assets/presplash.jpg
 
 # (str) Presplash screen background color
 android.presplash_color = #0a0f1d

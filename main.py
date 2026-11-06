@@ -29,6 +29,19 @@ def main():
         # Android Mobile environment
         import datetime
         import traceback
+
+        # Ensure KIVY_HOME is set to a guaranteed writable Android storage location
+        # BEFORE any Kivy or mobile modules are imported
+        try:
+            from storage_config import get_storage_dir
+            storage_dir = get_storage_dir()
+            kivy_home = os.path.join(storage_dir, ".kivy")
+            os.makedirs(kivy_home, exist_ok=True)
+            os.environ["KIVY_HOME"] = kivy_home
+            print(f"Android KIVY_HOME initialized to: {kivy_home}")
+        except Exception as e:
+            print(f"Notice initializing Android KIVY_HOME: {e}")
+
         try:
             from mobile_app import WorkPulseMobileApp
             WorkPulseMobileApp().run()

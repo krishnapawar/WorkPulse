@@ -21,13 +21,16 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 if BASE_DIR not in sys.path:
     sys.path.insert(0, BASE_DIR)
 
-# Ensure KIVY_HOME is writable in all environments
-if "KIVY_HOME" not in os.environ:
+# Ensure KIVY_HOME is writable in all environments BEFORE importing Kivy
+if "KIVY_HOME" not in os.environ or not os.path.isdir(os.environ.get("KIVY_HOME", "")):
     try:
-        test_dir = os.path.expanduser("~/.kivy")
-        os.makedirs(test_dir, exist_ok=True)
+        from storage_config import get_storage_dir
+        s_dir = get_storage_dir()
+        k_home = os.path.join(s_dir, ".kivy")
+        os.makedirs(k_home, exist_ok=True)
+        os.environ["KIVY_HOME"] = k_home
     except Exception:
-        os.environ["KIVY_HOME"] = "/tmp/.kivy"
+        pass
 
 try:
     from kivy.app import App  # type: ignore
@@ -6742,15 +6745,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if is_android():
             try:
                 from android.permissions import request_permissions, Permission
-                request_permissions([
-                    Permission.INTERNET,
-                    Permission.ACCESS_NETWORK_STATE,
-                    Permission.ACCESS_WIFI_STATE,
-                    Permission.CHANGE_WIFI_MULTICAST_STATE,
-                    Permission.POST_NOTIFICATIONS,
-                    Permission.READ_EXTERNAL_STORAGE,
-                    Permission.WRITE_EXTERNAL_STORAGE,
-                ])
+                perms = []
+                for p_name in (
+                    'INTERNET', 'ACCESS_NETWORK_STATE', 'ACCESS_WIFI_STATE',
+                    'CHANGE_WIFI_MULTICAST_STATE', 'POST_NOTIFICATIONS',
+                    'READ_EXTERNAL_STORAGE', 'WRITE_EXTERNAL_STORAGE', 'READ_MEDIA_IMAGES'
+                ):
+                    if hasattr(Permission, p_name):
+                        perms.append(getattr(Permission, p_name))
+                if perms:
+                    request_permissions(perms)
             except Exception as e:
                 print(f"Notice: Android permissions: {e}")
 

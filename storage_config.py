@@ -16,6 +16,22 @@ def is_android():
     Detects if the application is running inside an Android environment
     across various Android launchers (python-for-android, Termux, Kivy).
     """
+    try:
+        import androidembed
+        return True
+    except ImportError:
+        pass
+    try:
+        import android
+        return True
+    except ImportError:
+        pass
+    try:
+        from jnius import autoclass
+        autoclass('org.kivy.android.PythonActivity')
+        return True
+    except Exception:
+        pass
     return (
         'ANDROID_BOOTLOGO' in os.environ or
         'ANDROID_ROOT' in os.environ or
