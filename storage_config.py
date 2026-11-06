@@ -29,41 +29,119 @@ def is_android():
     )
 
 
+def _is_writable_dir(directory):
+    """Verifies that a directory exists and can actually be written to."""
+    if not directory or not os.path.isdir(directory):
+        return False
+    try:
+        test_path = os.path.join(directory, f".wp_test_{os.getpid()}")
+        with open(test_path, "w") as f:
+            f.write("test")
+        if os.path.exists(test_path):
+            os.remove(test_path)
+            return True
+    except Exception:
+        return False
+    return False
+
+
 def get_storage_dir():
     """
     Returns a guaranteed writable storage directory across Android and Desktop.
-    On Android: uses Kivy running app's user_data_dir or ANDROID_PRIVATE.
-    On Desktop: uses the application directory.
+    On Android:
+      1. Tries native Android getFilesDir() via pyjnius (guaranteed writable)
+      2. Tries running Kivy App's user_data_dir
+      3. Tries ANDROID_PRIVATE, ANDROID_ARGUMENT, ANDROID_APP_PATH
+      4. Tries standard Android sandbox paths (/data/user/0/... and /data/data/...)
+      5. Validates write permissions before accepting any candidate
+      6. Fallbacks with complete try-except so it NEVER raises an unhandled OSError
     """
     if is_android():
-        # 1. Kivy active application private user data directory
+        # 1. Native Android getFilesDir() via pyjnius
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            act = getattr(PythonActivity, 'mActivity', None)
+            if act:
+                f = act.getFilesDir()
+                if f:
+                    p = f.getAbsolutePath()
+                    if p:
+                        os.makedirs(p, exist_ok=True)
+                        if _is_writable_dir(p):
+                            return p
+        except Exception:
+            pass
+
+        # 2. Kivy active application private user data directory
         try:
             from kivy.app import App
             running = App.get_running_app()
             if running and hasattr(running, 'user_data_dir') and running.user_data_dir:
                 d = running.user_data_dir
                 os.makedirs(d, exist_ok=True)
-                return d
+                if _is_writable_dir(d):
+                    return d
         except Exception:
             pass
 
-        # 2. Android private app directory environment variables
-        for env_k in ('ANDROID_PRIVATE', 'ANDROID_APP_PATH'):
+        # 3. Android private app directory environment variables
+        for env_k in ('ANDROID_PRIVATE', 'ANDROID_ARGUMENT', 'ANDROID_APP_PATH'):
             p = os.environ.get(env_k)
-            if p and os.path.exists(p):
-                target = os.path.join(p, 'files') if not p.endswith('files') else p
-                os.makedirs(target, exist_ok=True)
-                return target
+            if p:
+                candidates = [p]
+                if not p.endswith('files'):
+                    candidates.append(os.path.join(p, 'files'))
+                parent = os.path.dirname(p.rstrip('/'))
+                if parent:
+                    candidates.append(os.path.join(parent, 'files'))
+                for cand in candidates:
+                    try:
+                        os.makedirs(cand, exist_ok=True)
+                        if _is_writable_dir(cand):
+                            return cand
+                    except Exception:
+                        continue
 
-        # 3. Fallback to home/user directory on Android
-        home = os.path.expanduser('~')
-        if home and os.path.exists(home):
-            wp_dir = os.path.join(home, 'workpulse_data')
-            os.makedirs(wp_dir, exist_ok=True)
-            return wp_dir
+        # 4. Standard internal app sandbox paths for WorkPulse
+        for pkg_cand in (
+            '/data/data/org.krishnapawar.workpulse/files',
+            '/data/user/0/org.krishnapawar.workpulse/files',
+            '/data/data/org.krishnapawar.workpulse',
+            '/data/user/0/org.krishnapawar.workpulse',
+        ):
+            try:
+                os.makedirs(pkg_cand, exist_ok=True)
+                if _is_writable_dir(pkg_cand):
+                    return pkg_cand
+            except Exception:
+                continue
+
+        # 5. Fallback to /tmp or home
+        for fallback in ('/tmp', os.path.expanduser('~')):
+            try:
+                if fallback and os.path.exists(fallback):
+                    d = os.path.join(fallback, 'workpulse_data')
+                    os.makedirs(d, exist_ok=True)
+                    if _is_writable_dir(d):
+                        return d
+            except Exception:
+                continue
 
     # Desktop: directory where main application scripts live
     base_dir = os.path.dirname(os.path.abspath(__file__))
+    if _is_writable_dir(base_dir):
+        return base_dir
+    # Fallback if base_dir is read-only
+    for fb in ('/tmp', os.path.expanduser('~')):
+        try:
+            if fb and os.path.exists(fb):
+                d = os.path.join(fb, 'workpulse_data')
+                os.makedirs(d, exist_ok=True)
+                if _is_writable_dir(d):
+                    return d
+        except Exception:
+            continue
     return base_dir
 
 
@@ -73,18 +151,22 @@ def get_storage_path(filename):
     If the file does not exist yet in the writable storage directory, but a bundled
     version exists in the application root, it automatically copies it over.
     """
-    storage_dir = get_storage_dir()
-    target_path = os.path.join(storage_dir, filename)
+    try:
+        storage_dir = get_storage_dir()
+        target_path = os.path.join(storage_dir, filename)
 
-    if not os.path.exists(target_path):
-        bundled_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
-        if os.path.exists(bundled_path) and os.path.abspath(bundled_path) != os.path.abspath(target_path):
-            try:
-                shutil.copy2(bundled_path, target_path)
-            except Exception as e:
-                print(f"Notice: could not copy bundled {filename} to {target_path}: {e}")
+        if not os.path.exists(target_path):
+            bundled_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
+            if os.path.exists(bundled_path) and os.path.abspath(bundled_path) != os.path.abspath(target_path):
+                try:
+                    shutil.copy2(bundled_path, target_path)
+                except Exception as e:
+                    print(f"Notice: could not copy bundled {filename} to {target_path}: {e}")
 
-    return target_path
+        return target_path
+    except Exception as e:
+        print(f"Notice: get_storage_path exception for {filename}: {e}")
+        return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
 
 def get_or_create_device_id():
