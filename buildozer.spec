@@ -12,7 +12,7 @@ package.domain = org.krishnapawar.workpulse
 source.dir = .
 
 # (list) Source files to include (let empty to include all the files)
-source.include_exts = py,png,jpg,kv,atlas,json,xlsx,txt
+source.include_exts = py,png,jpg,kv,atlas,json,xlsx,txt,js
 
 # (list) List of inclusions using pattern matching
 source.include_patterns = assets/*,*.json,*.xlsx

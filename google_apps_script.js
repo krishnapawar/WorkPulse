@@ -61,16 +61,18 @@ function doPost(e) {
     ];
 
     // --------------------------------------------------------------------------
-    // ACTION 2: Sync Single Month Sheet (Default & Recommended)
+    // ACTION 2: Sync Single Month Sheet or Notes Tab
     // --------------------------------------------------------------------------
-    if (data.action === "sync_month" || data.action === "sync_sheet") {
-      var sheetName = data.sheet_name || "Work Logs";
+    if (data.action === "sync_month" || data.action === "sync_sheet" || data.action === "sync_notes") {
+      var sheetName = data.sheet_name || (data.action === "sync_notes" ? "Notes" : "Work Logs");
+      var isNotesSheet = (sheetName.trim().toLowerCase() === "notes" || data.action === "sync_notes");
       var targetSheet = ss.getSheetByName(sheetName);
       if (!targetSheet) {
         targetSheet = ss.insertSheet(sheetName);
       }
 
-      var headers = data.headers && data.headers.length ? data.headers : defaultHeaders;
+      var defaultNotesHeaders = ["ID", "Title", "Category", "Pinned", "Created At", "Updated At", "Content"];
+      var headers = (data.headers && data.headers.length) ? data.headers : (isNotesSheet ? defaultNotesHeaders : defaultHeaders);
       var rows = data.rows || [];
 
       // Clear previous content
@@ -79,7 +81,7 @@ function doPost(e) {
       // Write Header Row
       var headerRange = targetSheet.getRange(1, 1, 1, headers.length);
       headerRange.setValues([headers]);
-      headerRange.setBackground("#1F4E79");
+      headerRange.setBackground(isNotesSheet ? "#4338CA" : "#1F4E79");
       headerRange.setFontColor("#FFFFFF");
       headerRange.setFontWeight("bold");
       headerRange.setFontFamily("Segoe UI");
@@ -98,25 +100,56 @@ function doPost(e) {
         var backgrounds = [];
         var fontColors = [];
         for (var i = 0; i < rows.length; i++) {
-          var status = (rows[i][6] || "").toString().trim().toLowerCase();
           var rowBg = [];
           var rowFg = [];
-          var baseBg = "#FFFFFF";
-          var baseFg = "#1E293B";
 
-          if (status.indexOf("weekly off") !== -1) {
-            baseBg = "#DBEAFE"; baseFg = "#1E40AF";
-          } else if (status.indexOf("holiday") !== -1) {
-            baseBg = "#FEF3C7"; baseFg = "#92400E";
-          } else if (status.indexOf("leave") !== -1) {
-            baseBg = "#FEE2E2"; baseFg = "#991B1B";
-          }
+          if (isNotesSheet) {
+            // Notes row styling: Cat is index 2, Pin is index 3
+            var nCat = (rows[i][2] || "").toString().toLowerCase().trim();
+            var nPin = (rows[i][3] || "").toString().toUpperCase().trim();
+            var bBg = "#FFFFFF";
+            var bFg = "#1E293B";
 
-          for (var c = 0; c < headers.length; c++) {
-            if (c === 6 && status.indexOf("completed") !== -1) {
-              rowBg.push("#DCFCE7"); rowFg.push("#166534");
-            } else {
-              rowBg.push(baseBg); rowFg.push(baseFg);
+            if (nPin === "YES") {
+              bBg = "#FEF3C7"; bFg = "#92400E";
+            } else if (nCat === "urgent") {
+              bBg = "#FEE2E2"; bFg = "#991B1B";
+            } else if (nCat === "todo") {
+              bBg = "#DCFCE7"; bFg = "#166534";
+            } else if (nCat === "meeting") {
+              bBg = "#EDE9FE"; bFg = "#5B21B6";
+            } else if (nCat === "ideas") {
+              bBg = "#FEF9C3"; bFg = "#854D0E";
+            } else if (nCat === "work") {
+              bBg = "#DBEAFE"; bFg = "#1E40AF";
+            } else if (nCat === "personal") {
+              bBg = "#FCE7F3"; bFg = "#9D174D";
+            }
+
+            for (var c = 0; c < headers.length; c++) {
+              rowBg.push(bBg);
+              rowFg.push(bFg);
+            }
+          } else {
+            // Work log row styling
+            var status = (rows[i][6] || "").toString().trim().toLowerCase();
+            var baseBg = "#FFFFFF";
+            var baseFg = "#1E293B";
+
+            if (status.indexOf("weekly off") !== -1) {
+              baseBg = "#DBEAFE"; baseFg = "#1E40AF";
+            } else if (status.indexOf("holiday") !== -1) {
+              baseBg = "#FEF3C7"; baseFg = "#92400E";
+            } else if (status.indexOf("leave") !== -1) {
+              baseBg = "#FEE2E2"; baseFg = "#991B1B";
+            }
+
+            for (var c = 0; c < headers.length; c++) {
+              if (c === 6 && status.indexOf("completed") !== -1) {
+                rowBg.push("#DCFCE7"); rowFg.push("#166534");
+              } else {
+                rowBg.push(baseBg); rowFg.push(baseFg);
+              }
             }
           }
           backgrounds.push(rowBg);
@@ -124,10 +157,16 @@ function doPost(e) {
         }
         dataRange.setBackgrounds(backgrounds);
         dataRange.setFontColors(fontColors);
+
+        if (isNotesSheet && headers.length >= 7) {
+          targetSheet.getRange(2, 7, rows.length, 1).setWrap(true);
+        }
       }
 
       // Fast Preset Column Widths (Avoids slow autoResizeColumn network roundtrips)
-      var colWidths = [120, 100, 160, 220, 260, 95, 120, 180, 100, 100, 130, 130, 150];
+      var colWidths = isNotesSheet
+        ? [100, 220, 120, 80, 140, 140, 420]
+        : [120, 100, 160, 220, 260, 95, 120, 180, 100, 100, 130, 130, 150];
       for (var col = 1; col <= Math.min(headers.length, colWidths.length); col++) {
         targetSheet.setColumnWidth(col, colWidths[col - 1]);
       }
@@ -240,10 +279,10 @@ function doPost(e) {
     }
 
     // --------------------------------------------------------------------------
-    // ACTION 5: Fetch Single Month / Sheet Rows
+    // ACTION 5: Fetch Single Month, Notes, or Sheet Rows
     // --------------------------------------------------------------------------
-    if (data.action === "fetch_month" || data.action === "fetch_sheet") {
-      var fetchMonthName = data.sheet_name || "Work Logs";
+    if (data.action === "fetch_month" || data.action === "fetch_sheet" || data.action === "fetch_notes") {
+      var fetchMonthName = data.sheet_name || (data.action === "fetch_notes" ? "Notes" : "Work Logs");
       var fetchTargetSheet = ss.getSheetByName(fetchMonthName);
       if (!fetchTargetSheet) {
         var allCandidateSheets = ss.getSheets();

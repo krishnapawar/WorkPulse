@@ -2016,6 +2016,108 @@ def fetch_google_sheet_sheets_list(webapp_url=None, timeout=10):
     }
     return send_google_sheet_payload(url, payload, timeout=timeout)
 
+def sync_google_sheet_notes(notes=None, webapp_url=None, timeout=35):
+    """
+    Synchronizes all notes to Google Sheet in a dedicated 'Notes' tab.
+    Works seamlessly with both updated and existing deployed Google Apps Script backends.
+    """
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    if not url:
+        return False, "Google Sheet Web App URL is not configured. Please paste your Web App URL.", 0
+
+    if notes is None:
+        notes_file = os.path.join(os.path.dirname(os.path.abspath(__file__)), "notes.json")
+        notes = []
+        if os.path.exists(notes_file):
+            try:
+                with open(notes_file, "r", encoding="utf-8") as f:
+                    notes = json.load(f)
+            except Exception:
+                notes = []
+
+    headers = ["ID", "Title", "Category", "Pinned", "Created At", "Updated At", "Content"]
+    rows = []
+    for n in (notes or []):
+        rows.append([
+            str(n.get("id", "")),
+            str(n.get("title", "")),
+            str(n.get("tag", "Work")),
+            "YES" if n.get("is_pinned") else "NO",
+            str(n.get("created_at", "")),
+            str(n.get("updated_at", "")),
+            str(n.get("content", ""))
+        ])
+
+    payload = {
+        "action": "sync_notes",
+        "sheet_name": "Notes",
+        "headers": headers,
+        "rows": rows,
+        "user_name": settings.get("user_name", "Developer"),
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    ok, data, code = send_google_sheet_payload(url, payload, timeout=timeout)
+    # If legacy script returns unknown action, fallback automatically to sync_sheet
+    if not ok and (isinstance(data, str) and "Unknown action" in data):
+        payload["action"] = "sync_sheet"
+        ok, data, code = send_google_sheet_payload(url, payload, timeout=timeout)
+
+    return ok, data, code
+
+def fetch_google_sheet_notes(webapp_url=None, timeout=25):
+    """
+    Fetches all notes directly from the Google Sheet 'Notes' tab.
+    Returns (success: bool, notes_list: list, message: str).
+    """
+    settings = load_settings()
+    url = (webapp_url or settings.get("gsheet_webapp_url", "")).strip()
+    if not url:
+        return False, [], "Google Sheet Web App URL is not configured."
+
+    payload = {
+        "action": "fetch_notes",
+        "sheet_name": "Notes",
+        "client": "WorkPulse",
+        "timestamp": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    }
+
+    ok, data, code = send_google_sheet_payload(url, payload, timeout=timeout)
+    if not ok and (isinstance(data, str) and "Unknown action" in data):
+        payload["action"] = "fetch_sheet"
+        ok, data, code = send_google_sheet_payload(url, payload, timeout=timeout)
+
+    if not ok or not isinstance(data, dict):
+        msg = data if isinstance(data, str) else data.get("message", "Failed to fetch notes")
+        return False, [], str(msg)
+
+    rows = data.get("rows", [])
+    parsed_notes = []
+    for r in rows:
+        if not r or len(r) < 2:
+            continue
+        n_id = str(r[0]) if len(r) > 0 and str(r[0]).strip() else uuid.uuid4().hex[:10]
+        title = str(r[1]) if len(r) > 1 else "Untitled Note"
+        tag = str(r[2]) if len(r) > 2 and str(r[2]).strip() else "Work"
+        is_pin = (str(r[3]).strip().upper() == "YES") if len(r) > 3 else False
+        created = str(r[4]) if len(r) > 4 else ""
+        updated = str(r[5]) if len(r) > 5 else ""
+        content = str(r[6]) if len(r) > 6 else ""
+
+        parsed_notes.append({
+            "id": n_id,
+            "title": title,
+            "tag": tag,
+            "is_pinned": is_pin,
+            "created_at": created,
+            "updated_at": updated,
+            "content": content
+        })
+
+    return True, parsed_notes, f"Fetched {len(parsed_notes)} notes from Google Sheet"
+
+
 def is_google_sheet_configured(settings=None):
     """Checks whether a valid Google Sheet Web App URL is present in settings."""
     if settings is None:
