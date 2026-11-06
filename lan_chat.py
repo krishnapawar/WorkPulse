@@ -41,7 +41,8 @@ try:
     from storage_config import (
         is_android, get_storage_path, acquire_android_multicast_lock,
         release_android_multicast_lock, get_android_network_info,
-        show_android_notification, DummyMessageBox, DummyFileDialog
+        show_android_notification, DummyMessageBox, DummyFileDialog,
+        get_or_create_device_id, get_persistent_user_id
     )
 except Exception:
     def is_android(): return False
@@ -50,6 +51,11 @@ except Exception:
     def release_android_multicast_lock(): pass
     def get_android_network_info(): return None, []
     def show_android_notification(t, m): return False
+    def get_or_create_device_id(): return "dev_local_fallback"
+    def get_persistent_user_id(u="Developer"):
+        import re
+        c = re.sub(r'[^a-zA-Z0-9]', '', (u or 'user').lower())[:10] or 'user'
+        return f"{c}_dev_local_fallback"
     class DummyMessageBox:
         @staticmethod
         def showerror(title="", message="", **kwargs): print(f"[{title}] {message}")
@@ -1560,7 +1566,8 @@ class LANChatEngine:
     """
     def __init__(self, user_name="Developer", port=DEFAULT_LAN_PORT,
                  on_message=None, on_peers_change=None, on_message_deleted=None,
-                 on_reaction=None, on_pinned_change=None, on_poll_updated=None):
+                 on_reaction=None, on_pinned_change=None, on_poll_updated=None,
+                 user_id=None, device_id=None):
         self.user_name = user_name
         self.port = port
         self.on_message = on_message
@@ -1570,7 +1577,12 @@ class LANChatEngine:
         self.on_pinned_change = on_pinned_change
         self.on_poll_updated = on_poll_updated
 
-        self.user_id = uuid.uuid4().hex[:10]
+        # Persistent Device ID & User ID across all app restarts
+        self.device_id = device_id or get_or_create_device_id()
+        if user_id:
+            self.user_id = user_id
+        else:
+            self.user_id = get_persistent_user_id(self.user_name)
         self.local_ip, self.hostname, self.broadcast_addrs = get_network_info()
         self.avatar_color = get_avatar_color(self.user_name)
 
@@ -1811,6 +1823,7 @@ class LANChatEngine:
         with self.lock:
             self.user_name = user_name or self.user_name
             self.avatar_color = get_avatar_color(self.user_name)
+            self.user_id = get_persistent_user_id(self.user_name)
             if status is not None:
                 self.status = status
             if status_emoji is not None:
@@ -1823,6 +1836,7 @@ class LANChatEngine:
             "id": uuid.uuid4().hex[:12],
             "type": "status_update",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "status": self.status,
             "status_emoji": self.status_emoji,
@@ -2382,6 +2396,7 @@ class LANChatEngine:
             "id": uuid.uuid4().hex[:12],
             "type": "beacon_ack" if is_ack else "beacon",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "hostname": self.hostname,
             "ip": self.local_ip,
@@ -2474,11 +2489,19 @@ class LANChatEngine:
 
         if pkt_type in ("beacon", "beacon_ack"):
             is_new = False
+            pkt_dev_id = pkt.get("device_id")
             with self.lock:
+                # Clean up any stale peer entry with same device_id under an older key
+                if pkt_dev_id:
+                    stale_ids = [pid for pid, p in self.peers.items() if pid != sender_id and p.get("device_id") == pkt_dev_id]
+                    for sid in stale_ids:
+                        del self.peers[sid]
+
                 if sender_id not in self.peers:
                     is_new = True
                 self.peers[sender_id] = {
                     "id": sender_id,
+                    "device_id": pkt_dev_id or sender_id,
                     "user_name": pkt.get("user_name", "Colleague"),
                     "hostname": pkt.get("hostname", "Device"),
                     "ip": peer_ip,
@@ -2514,8 +2537,14 @@ class LANChatEngine:
         elif pkt_type == "chat":
             recipient_id = pkt.get("recipient_id", "") or ""
             recipient_name = pkt.get("recipient_name", "") or ""
-            if recipient_id and recipient_id != self.user_id:
-                return
+            if recipient_id:
+                is_for_me = (
+                    recipient_id == self.user_id or
+                    (hasattr(self, 'device_id') and self.device_id and recipient_id.endswith(self.device_id)) or
+                    (recipient_name and recipient_name.lower().strip() == self.user_name.lower().strip())
+                )
+                if not is_for_me:
+                    return
 
             text = pkt.get("text", "")
             my_tag = f"@{self.user_name.lower()}"
@@ -2526,6 +2555,7 @@ class LANChatEngine:
                 "id": pkt_id,
                 "type": "chat",
                 "sender_id": sender_id,
+                "device_id": pkt.get("device_id", sender_id),
                 "user_name": pkt.get("user_name", "Colleague"),
                 "avatar_color": pkt.get("avatar_color", get_avatar_color(pkt.get("user_name", ""))),
                 "text": text,
@@ -2561,8 +2591,14 @@ class LANChatEngine:
         elif pkt_type == "file":
             recipient_id = pkt.get("recipient_id", "") or ""
             recipient_name = pkt.get("recipient_name", "") or ""
-            if recipient_id and recipient_id != self.user_id:
-                return
+            if recipient_id:
+                is_for_me = (
+                    recipient_id == self.user_id or
+                    (hasattr(self, 'device_id') and self.device_id and recipient_id.endswith(self.device_id)) or
+                    (recipient_name and recipient_name.lower().strip() == self.user_name.lower().strip())
+                )
+                if not is_for_me:
+                    return
 
             f_name = pkt.get("file_name", "shared_file")
             f_size = pkt.get("file_size", 0)
@@ -2720,8 +2756,14 @@ class LANChatEngine:
         elif pkt_type == "poll":
             recipient_id = pkt.get("recipient_id", "") or ""
             recipient_name = pkt.get("recipient_name", "") or ""
-            if recipient_id and recipient_id != self.user_id:
-                return
+            if recipient_id:
+                is_for_me = (
+                    recipient_id == self.user_id or
+                    (hasattr(self, 'device_id') and self.device_id and recipient_id.endswith(self.device_id)) or
+                    (recipient_name and recipient_name.lower().strip() == self.user_name.lower().strip())
+                )
+                if not is_for_me:
+                    return
 
             question = pkt.get("question", "Team Poll")
             options = pkt.get("options", [])

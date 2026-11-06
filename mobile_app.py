@@ -102,16 +102,25 @@ def safe_escape_markup(text):
     """Escapes Kivy markup tags to prevent markup parsing errors with user text."""
     if not isinstance(text, str):
         text = str(text or "")
-    return text.replace("&", "&amp;").replace("[", "&bl;").replace("]", "&br;")
+    return text.replace("[", "&bl;").replace("]", "&br;")
 
 try:
-    from storage_config import is_android, get_storage_path, get_storage_dir, acquire_android_multicast_lock, show_android_notification
+    from storage_config import (
+        is_android, get_storage_path, get_storage_dir,
+        acquire_android_multicast_lock, show_android_notification,
+        get_or_create_device_id, get_persistent_user_id
+    )
 except Exception:
     def is_android(): return False
     def get_storage_path(fn): return fn
     def get_storage_dir(): return os.path.dirname(os.path.abspath(__file__))
     def acquire_android_multicast_lock(): return None
     def show_android_notification(t, m): return False
+    def get_or_create_device_id(): return "dev_local_fallback"
+    def get_persistent_user_id(u="Developer"):
+        import re
+        c = re.sub(r'[^a-zA-Z0-9]', '', (u or 'user').lower())[:10] or 'user'
+        return f"{c}_dev_local_fallback"
 
 NOTES_FILE = get_storage_path("notes.json")
 
@@ -248,6 +257,18 @@ except Exception as e:
 
 
 class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.settings = load_settings() if 'load_settings' in globals() else {}
+        self.chat_engine = None
+        self.unread_chat_count = 0
+        self.rendered_msg_ids = set()
+        self.current_tab = "work"
+        self.downloaded_files = {}
+        self.active_dm_peer = None
+        self.current_hist_filter = "All"
+        self.hist_filter_buttons = {}
+
     def build(self):
         self.title = "WorkPulse - Mobile"
         if KIVY_AVAILABLE and platform not in ('android', 'ios') and hasattr(Window, 'size'):
@@ -277,6 +298,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.current_tab = "work"
         self.downloaded_files = {}  # Cache of local files: {file_id: local_file_path}
         self.active_dm_peer = None  # None = Public Room, or peer dict when in 1-on-1 DM
+        self.current_hist_filter = "All"
+        self.hist_filter_buttons = {}
 
         # Main Root Container
         root = BoxLayout(orientation='vertical', padding=0, spacing=0)
@@ -689,13 +712,13 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         return lbl
 
     # =========================================================================
-    # TAB 2: MY UPDATES / WORK LOGS HISTORY VIEW
+    # TAB 2: MY UPDATES / WORK LOGS HISTORY VIEW (MODERN MOBILE UI)
     # =========================================================================
     def build_history_view(self):
-        root = BoxLayout(orientation='vertical', padding=[dp(10), dp(6), dp(10), dp(10)], spacing=dp(8))
+        root = BoxLayout(orientation='vertical', padding=[dp(8), dp(6), dp(8), dp(6)], spacing=dp(6))
 
-        # Top Control Row: Month Selector & Refresh
-        top_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(46), spacing=dp(8))
+        # 1. Top Bar: Month Selector + Sync G-Sheet + Refresh
+        top_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
         
         months = get_available_months() if 'get_available_months' in globals() else []
         current_m = datetime.datetime.now().strftime("%B %Y")
@@ -707,8 +730,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.sp_hist_month = Spinner(
             text=current_m,
             values=tuple(months),
-            font_size='14sp',
-            size_hint_x=0.72,
+            font_size='13sp',
+            bold=True,
+            size_hint_x=0.52,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
             color=(1, 1, 1, 1)
@@ -716,11 +740,23 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.sp_hist_month.bind(text=lambda s, val: self.refresh_history_list())
         top_row.add_widget(self.sp_hist_month)
 
+        self.btn_hist_sync = Button(
+            text="Sync Sheet",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.25,
+            background_normal='',
+            background_color=get_color_from_hex("#059669"),
+            color=(1, 1, 1, 1)
+        )
+        self.btn_hist_sync.bind(on_release=lambda x: self._on_hist_sync_clicked())
+        top_row.add_widget(self.btn_hist_sync)
+
         btn_refresh = Button(
             text="Refresh",
-            font_size='13sp',
+            font_size='11sp',
             bold=True,
-            size_hint_x=0.28,
+            size_hint_x=0.23,
             background_normal='',
             background_color=get_color_from_hex("#0284c7"),
             color=(1, 1, 1, 1)
@@ -729,43 +765,135 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         top_row.add_widget(btn_refresh)
         root.add_widget(top_row)
 
-        # Summary Bar
-        self.lbl_hist_stats = Label(
-            text="Loading summary...",
-            font_size='13sp',
-            size_hint_y=None,
-            height=dp(26),
-            color=get_color_from_hex("#38bdf8"),
-            halign='left',
-            valign='middle'
-        )
-        self.lbl_hist_stats.bind(size=self.lbl_hist_stats.setter('text_size'))
-        root.add_widget(self.lbl_hist_stats)
+        # 2. Executive 3-Card KPI Dashboard Strip
+        kpi_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(52), spacing=dp(6))
+        
+        # KPI Card 1: Total Tasks
+        self.card_kpi_tasks = RoundedCard(bg_hex="#131e33", radius=[dp(10), dp(10), dp(10), dp(10)], border_hex="#334155", orientation='vertical', size_hint_x=0.33, padding=[dp(6), dp(4), dp(6), dp(4)], spacing=dp(1))
+        self.lbl_kpi_tasks_val = Label(text="0", font_size='16sp', bold=True, color=(1, 1, 1, 1), halign='center', valign='middle')
+        self.lbl_kpi_tasks_val.bind(size=self.lbl_kpi_tasks_val.setter('text_size'))
+        lbl_kpi_tasks_sub = Label(text="Total Logs", font_size='10sp', color=get_color_from_hex("#94a3b8"), halign='center', valign='middle')
+        lbl_kpi_tasks_sub.bind(size=lbl_kpi_tasks_sub.setter('text_size'))
+        self.card_kpi_tasks.add_widget(self.lbl_kpi_tasks_val)
+        self.card_kpi_tasks.add_widget(lbl_kpi_tasks_sub)
+        kpi_row.add_widget(self.card_kpi_tasks)
 
-        # Search Bar
+        # KPI Card 2: Total Hours
+        self.card_kpi_hours = RoundedCard(bg_hex="#131e33", radius=[dp(10), dp(10), dp(10), dp(10)], border_hex="#334155", orientation='vertical', size_hint_x=0.34, padding=[dp(6), dp(4), dp(6), dp(4)], spacing=dp(1))
+        self.lbl_kpi_hours_val = Label(text="0.0h", font_size='16sp', bold=True, color=get_color_from_hex("#34d399"), halign='center', valign='middle')
+        self.lbl_kpi_hours_val.bind(size=self.lbl_kpi_hours_val.setter('text_size'))
+        lbl_kpi_hours_sub = Label(text="Work Hours", font_size='10sp', color=get_color_from_hex("#94a3b8"), halign='center', valign='middle')
+        lbl_kpi_hours_sub.bind(size=lbl_kpi_hours_sub.setter('text_size'))
+        self.card_kpi_hours.add_widget(self.lbl_kpi_hours_val)
+        self.card_kpi_hours.add_widget(lbl_kpi_hours_sub)
+        kpi_row.add_widget(self.card_kpi_hours)
+
+        # KPI Card 3: Completed / Status
+        self.card_kpi_status = RoundedCard(bg_hex="#131e33", radius=[dp(10), dp(10), dp(10), dp(10)], border_hex="#334155", orientation='vertical', size_hint_x=0.33, padding=[dp(6), dp(4), dp(6), dp(4)], spacing=dp(1))
+        self.lbl_kpi_status_val = Label(text="0 Done", font_size='16sp', bold=True, color=get_color_from_hex("#38bdf8"), halign='center', valign='middle')
+        self.lbl_kpi_status_val.bind(size=self.lbl_kpi_status_val.setter('text_size'))
+        lbl_kpi_status_sub = Label(text="Completed", font_size='10sp', color=get_color_from_hex("#94a3b8"), halign='center', valign='middle')
+        lbl_kpi_status_sub.bind(size=lbl_kpi_status_sub.setter('text_size'))
+        self.card_kpi_status.add_widget(self.lbl_kpi_status_val)
+        self.card_kpi_status.add_widget(lbl_kpi_status_sub)
+        kpi_row.add_widget(self.card_kpi_status)
+
+        root.add_widget(kpi_row)
+
+        # 3. Horizontal Scrollable Filter Chips
+        self.current_hist_filter = "All"
+        self.hist_filter_buttons = {}
+        chip_scroll = ScrollView(size_hint_y=None, height=dp(30), do_scroll_x=True, do_scroll_y=False, bar_width=0)
+        self.hist_chip_box = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(30), spacing=dp(6), padding=[dp(2), 0, dp(2), 0])
+        self.hist_chip_box.bind(minimum_width=self.hist_chip_box.setter('width'))
+        chip_scroll.add_widget(self.hist_chip_box)
+        root.add_widget(chip_scroll)
+
+        # 4. Search Bar with Instant Clear Button
+        search_box = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(6))
         self.in_hist_search = TextInput(
-            hint_text="Search by task, project, status...",
+            hint_text="Search tasks, projects, notes...",
             multiline=False,
-            font_size='14sp',
-            size_hint_y=None,
-            height=dp(44),
+            font_size='13sp',
+            size_hint_x=0.78,
             background_normal='',
             background_color=get_color_from_hex("#1e293b"),
             foreground_color=(1, 1, 1, 1),
             hint_text_color=get_color_from_hex("#64748b"),
             padding=[dp(10), dp(10)]
         )
-        self.in_hist_search.bind(text=lambda s, val: self.refresh_history_list())
-        root.add_widget(self.in_hist_search)
+        self.in_hist_search.bind(text=lambda s, val: self._on_hist_search_changed(val))
+        search_box.add_widget(self.in_hist_search)
 
-        # Updates List ScrollView
-        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
+        self.btn_clear_hist_search = Button(
+            text="Clear",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.22,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1),
+            opacity=0,
+            disabled=True
+        )
+        self.btn_clear_hist_search.bind(on_release=lambda x: self._clear_hist_search())
+        search_box.add_widget(self.btn_clear_hist_search)
+        root.add_widget(search_box)
+
+        # 5. Updates List ScrollView
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False, bar_width=dp(3), scroll_type=['content'])
         self.hist_list_layout = GridLayout(cols=1, spacing=dp(8), size_hint_y=None, padding=[0, dp(4), 0, dp(12)])
         self.hist_list_layout.bind(minimum_height=self.hist_list_layout.setter('height'))
         scroll.add_widget(self.hist_list_layout)
         root.add_widget(scroll)
 
         return root
+
+    def _on_hist_search_changed(self, val):
+        if hasattr(self, 'btn_clear_hist_search') and self.btn_clear_hist_search:
+            has_text = bool(val.strip())
+            self.btn_clear_hist_search.opacity = 1 if has_text else 0
+            self.btn_clear_hist_search.disabled = not has_text
+        self.refresh_history_list()
+
+    def _clear_hist_search(self):
+        if hasattr(self, 'in_hist_search') and self.in_hist_search:
+            self.in_hist_search.text = ""
+
+    def _on_hist_sync_clicked(self):
+        if not hasattr(self, 'sp_hist_month'):
+            return
+        target_m = self.sp_hist_month.text
+        if hasattr(self, 'btn_hist_sync') and self.btn_hist_sync:
+            self.btn_hist_sync.text = "Syncing..."
+            self.btn_hist_sync.disabled = True
+
+        def _worker():
+            msg = ""
+            try:
+                if 'sync_google_sheet_month' in globals():
+                    ok, data, code = sync_google_sheet_month(target_m)
+                    if ok:
+                        cnt = data.get("updatedRows", "") if isinstance(data, dict) else ""
+                        msg = f"Synced {cnt} rows to Google Sheet ('{target_m}') successfully!"
+                    else:
+                        err = data if isinstance(data, str) else (data.get("message", "Error") if isinstance(data, dict) else "Error")
+                        msg = f"Sync failed: {err}"
+                else:
+                    msg = "Google Sheet sync module not available."
+            except Exception as e:
+                msg = f"Error during sync: {e}"
+
+            def _done(dt):
+                if hasattr(self, 'btn_hist_sync') and self.btn_hist_sync:
+                    self.btn_hist_sync.text = "Sync Sheet"
+                    self.btn_hist_sync.disabled = False
+                self.show_popup("Sheet Sync", msg)
+                self.refresh_history_list()
+
+            Clock.schedule_once(_done, 0)
+
+        threading.Thread(target=_worker, daemon=True).start()
 
     def refresh_history_list(self):
         if not hasattr(self, 'hist_list_layout') or not self.hist_list_layout:
@@ -786,33 +914,107 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         records = load_month_records(target_m) if 'load_month_records' in globals() else []
 
         search_q = self.in_hist_search.text.strip().lower() if hasattr(self, 'in_hist_search') else ""
-        filtered = []
         tot_hours = 0.0
         comp_cnt = 0
+        inp_cnt = 0
+        rest_cnt = 0
+        projects_set = []
 
+        # Tally metrics across whole month
+        for r in records:
+            p_val = str(r[2] or "").strip()
+            if p_val and p_val not in projects_set and p_val.lower() not in ("weekly off", "holiday"):
+                projects_set.append(p_val)
+            st_val = str(r[6] or "").strip().lower()
+            h_val = str(r[5] or "0").replace("h", "").strip()
+            try:
+                tot_hours += float(h_val)
+            except Exception:
+                pass
+            if st_val == "completed":
+                comp_cnt += 1
+            elif st_val == "in progress":
+                inp_cnt += 1
+            elif st_val in ("weekly off", "holiday", "leave") or "weekly off" in p_val.lower() or "holiday" in p_val.lower():
+                rest_cnt += 1
+
+        # Update KPI Cards
+        if hasattr(self, 'lbl_kpi_tasks_val') and self.lbl_kpi_tasks_val:
+            self.lbl_kpi_tasks_val.text = str(len(records))
+        if hasattr(self, 'lbl_kpi_hours_val') and self.lbl_kpi_hours_val:
+            self.lbl_kpi_hours_val.text = f"{tot_hours:.1f}h"
+        if hasattr(self, 'lbl_kpi_status_val') and self.lbl_kpi_status_val:
+            self.lbl_kpi_status_val.text = f"{comp_cnt} Done"
+
+        # Dynamically build filter chips ribbon
+        categories = [
+            ("All", f"All ({len(records)})"),
+            ("Completed", f"Done ({comp_cnt})"),
+        ]
+        if inp_cnt > 0:
+            categories.append(("In Progress", f"In Progress ({inp_cnt})"))
+        if rest_cnt > 0:
+            categories.append(("Rest / Off", f"Rest / Off ({rest_cnt})"))
+        for pj in projects_set[:4]:
+            categories.append((pj, pj))
+
+        if hasattr(self, 'hist_chip_box') and self.hist_chip_box:
+            self.hist_chip_box.clear_widgets()
+            self.hist_filter_buttons = {}
+            for cat_key, cat_label in categories:
+                is_active = (getattr(self, 'current_hist_filter', 'All') == cat_key)
+                btn_chip = Button(
+                    text=cat_label,
+                    font_size='11sp',
+                    bold=True,
+                    size_hint_x=None,
+                    width=dp(len(cat_label) * 8 + 22),
+                    background_normal='',
+                    background_color=get_color_from_hex("#2563eb" if is_active else "#1e293b"),
+                    color=(1, 1, 1, 1) if is_active else get_color_from_hex("#94a3b8")
+                )
+                def _on_filter_click(b, k=cat_key):
+                    self.current_hist_filter = k
+                    self.refresh_history_list()
+                btn_chip.bind(on_release=_on_filter_click)
+                self.hist_filter_buttons[cat_key] = btn_chip
+                self.hist_chip_box.add_widget(btn_chip)
+
+        # Filter the records list
+        active_f = getattr(self, 'current_hist_filter', 'All')
+        filtered = []
         for r in records:
             t_title = str(r[3] or "")
             t_proj = str(r[2] or "")
             t_status = str(r[6] or "")
             t_desc = str(r[4] or "")
-            t_hours_s = str(r[5] or "0").replace("h", "").strip()
-            try:
-                tot_hours += float(t_hours_s)
-            except Exception:
-                pass
-            if t_status.lower() == "completed":
-                comp_cnt += 1
+            st_lower = t_status.lower()
+            pj_lower = t_proj.lower()
 
-            if not search_q or search_q in t_title.lower() or search_q in t_proj.lower() or search_q in t_status.lower() or search_q in t_desc.lower():
-                filtered.append(r)
+            if active_f == "Completed" and st_lower != "completed":
+                continue
+            elif active_f == "In Progress" and st_lower != "in progress":
+                continue
+            elif active_f == "Rest / Off" and not (st_lower in ("weekly off", "holiday", "leave") or "weekly off" in pj_lower or "holiday" in pj_lower):
+                continue
+            elif active_f != "All" and active_f not in ("Completed", "In Progress", "Rest / Off"):
+                if active_f.lower() != t_proj.strip().lower():
+                    continue
 
-        if hasattr(self, 'lbl_hist_stats'):
-            self.lbl_hist_stats.text = f"{len(records)} Tasks  |  {tot_hours:.1f} Total Hours  |  {comp_cnt} Completed"
+            if search_q:
+                combined = f"{t_title} {t_proj} {t_status} {t_desc} {str(r[1] or '')}".lower()
+                if search_q not in combined:
+                    continue
+
+            filtered.append(r)
 
         if not filtered:
-            msg = "No work updates matching filter." if search_q else f"No updates logged for {target_m}.\nUse 'Log Work' tab to save tasks!"
-            lbl = Label(text=msg, font_size='14sp', color=get_color_from_hex("#64748b"), size_hint_y=None, height=dp(60), halign='center')
-            self.hist_list_layout.add_widget(lbl)
+            msg = "No work updates matching filter." if (search_q or active_f != "All") else f"No updates logged for {target_m}.\nUse 'Log Work' tab to save tasks!"
+            empty_card = RoundedCard(bg_hex="#131e33", radius=[dp(12), dp(12), dp(12), dp(12)], border_hex="#334155", orientation='vertical', size_hint_y=None, height=dp(100), padding=[dp(16), dp(16)])
+            lbl = Label(text=msg, font_size='13sp', color=get_color_from_hex("#64748b"), halign='center', valign='middle')
+            lbl.bind(size=lbl.setter('text_size'))
+            empty_card.add_widget(lbl)
+            self.hist_list_layout.add_widget(empty_card)
             return
 
         for r in filtered:
@@ -825,13 +1027,69 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         proj_v = str(r[2] or "General Work")
         title_v = str(r[3] or "Untitled Task")
         desc_v = str(r[4] or "")
-        hours_v = str(r[5] or "0")
+        hours_v = str(r[5] or "0").replace("h", "").strip()
         status_v = str(r[6] or "Completed")
         login_v = str(r[8] or "")
         logout_v = str(r[9] or "")
 
-        card = RoundedCard(bg_hex="#1e293b", radius=[dp(12), dp(12), dp(12), dp(12)], orientation='vertical', size_hint_y=None, padding=[dp(12), dp(10), dp(12), dp(10)], spacing=dp(5))
-        card.height = dp(144) if desc_v else dp(116)
+        is_rest = (status_v.lower() in ("weekly off", "weekend", "holiday") or "weekly off" in proj_v.lower() or "holiday" in proj_v.lower())
+
+        if is_rest:
+            card = RoundedCard(
+                bg_hex="#0e1726",
+                radius=[dp(12), dp(12), dp(12), dp(12)],
+                border_hex="#1e3a8a" if "weekly off" in status_v.lower() else "#7c2d12",
+                orientation='vertical',
+                size_hint_y=None,
+                padding=[dp(12), dp(10), dp(12), dp(10)],
+                spacing=dp(6)
+            )
+            card.bind(minimum_height=card.setter('height'))
+
+            row_top = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(24), spacing=dp(8))
+            lbl_date = Label(text=f"[b]{date_v}[/b]", markup=True, font_size='12sp', color=get_color_from_hex("#38bdf8"), size_hint_x=0.5, halign='left', valign='middle')
+            lbl_date.bind(size=lbl_date.setter('text_size'))
+            row_top.add_widget(lbl_date)
+
+            tag_c = "#3b82f6" if "weekly off" in status_v.lower() else "#f97316"
+            lbl_tag = Label(text=f"[b]{status_v}[/b]", markup=True, font_size='11sp', color=get_color_from_hex(tag_c), size_hint_x=0.5, halign='right', valign='middle')
+            lbl_tag.bind(size=lbl_tag.setter('text_size'))
+            row_top.add_widget(lbl_tag)
+            card.add_widget(row_top)
+
+            row_mid = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(24), spacing=dp(8))
+            lbl_title = Label(text=f"[b]{safe_escape_markup(title_v)}[/b]", markup=True, font_size='14sp', color=get_color_from_hex("#94a3b8"), size_hint_x=0.8, halign='left', valign='middle')
+            lbl_title.bind(size=lbl_title.setter('text_size'))
+            row_mid.add_widget(lbl_title)
+
+            lbl_h = Label(text="0h", font_size='12sp', color=get_color_from_hex("#64748b"), size_hint_x=0.2, halign='right', valign='middle')
+            lbl_h.bind(size=lbl_h.setter('text_size'))
+            row_mid.add_widget(lbl_h)
+            card.add_widget(row_mid)
+
+            row_acts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(30), spacing=dp(8))
+            btn_view = Button(text="View Details", font_size='11sp', bold=True, size_hint_x=0.75, background_normal='', background_color=get_color_from_hex("#1e293b"), color=get_color_from_hex("#38bdf8"))
+            btn_view.bind(on_release=lambda x, rec=r: self.view_update_details(rec, sheet_name))
+            row_acts.add_widget(btn_view)
+
+            btn_del = Button(text="Delete", font_size='11sp', bold=True, size_hint_x=0.25, background_normal='', background_color=get_color_from_hex("#7f1d1d"), color=get_color_from_hex("#f87171"))
+            btn_del.bind(on_release=lambda x, rid=rec_id, sm=sheet_name: self.delete_update_item(rid, sm))
+            row_acts.add_widget(btn_del)
+            card.add_widget(row_acts)
+
+            return card
+
+        # Regular Work Task Card
+        card = RoundedCard(
+            bg_hex="#162238",
+            radius=[dp(12), dp(12), dp(12), dp(12)],
+            border_hex="#334155",
+            orientation='vertical',
+            size_hint_y=None,
+            padding=[dp(12), dp(10), dp(12), dp(10)],
+            spacing=dp(6)
+        )
+        card.bind(minimum_height=card.setter('height'))
 
         # Row 1: Date & Project Pill
         row1 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(22), spacing=dp(8))
@@ -840,7 +1098,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             markup=True,
             font_size='13sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.45,
+            size_hint_x=0.42,
             halign='left',
             valign='middle'
         )
@@ -850,9 +1108,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         lbl_proj = Label(
             text=f"[b]{safe_escape_markup(proj_v)}[/b]",
             markup=True,
-            font_size='12sp',
+            font_size='11sp',
             color=get_color_from_hex("#c084fc"),
-            size_hint_x=0.55,
+            size_hint_x=0.58,
             halign='right',
             valign='middle'
         )
@@ -860,7 +1118,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         row1.add_widget(lbl_proj)
         card.add_widget(row1)
 
-        # Row 2: Title & Hours Badge
+        # Row 2: Task Title (left) & Hours Badge (right)
         row2 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(26), spacing=dp(8))
         lbl_title = Label(
             text=f"[b]{safe_escape_markup(title_v)}[/b]",
@@ -877,7 +1135,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         lbl_hours = Label(
             text=f"[b]{hours_v}h[/b]",
             markup=True,
-            font_size='14sp',
+            font_size='13sp',
             color=get_color_from_hex("#34d399"),
             size_hint_x=0.24,
             halign='right',
@@ -888,11 +1146,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         card.add_widget(row2)
 
         # Row 3: Shift Timings & Status Badge
-        row3 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(22), spacing=dp(8))
+        row3 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(20), spacing=dp(8))
         shift_txt = f"{login_v} - {logout_v}" if (login_v or logout_v) else "Shift: Standard"
         lbl_shift = Label(
             text=f"Shift: {shift_txt}",
-            font_size='12sp',
+            font_size='11sp',
             color=get_color_from_hex("#94a3b8"),
             size_hint_x=0.62,
             halign='left',
@@ -913,7 +1171,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         lbl_st = Label(
             text=f"[b]{status_v}[/b]",
             markup=True,
-            font_size='12sp',
+            font_size='11sp',
             color=get_color_from_hex(st_c),
             size_hint_x=0.38,
             halign='right',
@@ -923,43 +1181,76 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         row3.add_widget(lbl_st)
         card.add_widget(row3)
 
-        # Row 4: Description preview
+        # Row 4: Clean Description Inset Box
         if desc_v:
-            desc_sub = (desc_v[:80] + "...") if len(desc_v) > 80 else desc_v
+            desc_sub = (desc_v[:110] + "...") if len(desc_v) > 110 else desc_v
+            desc_card = RoundedCard(
+                bg_hex="#0b1322",
+                radius=[dp(6), dp(6), dp(6), dp(6)],
+                size_hint_y=None,
+                height=dp(38),
+                padding=[dp(8), dp(4), dp(8), dp(4)]
+            )
             lbl_desc = Label(
                 text=safe_escape_markup(desc_sub),
-                font_size='12sp',
-                color=get_color_from_hex("#64748b"),
-                size_hint_y=None,
-                height=dp(20),
+                font_size='11sp',
+                color=get_color_from_hex("#94a3b8"),
                 halign='left',
                 valign='middle'
             )
             lbl_desc.bind(size=lbl_desc.setter('text_size'))
-            card.add_widget(lbl_desc)
+            desc_card.add_widget(lbl_desc)
+            card.add_widget(desc_card)
 
-        # Row 5: Action Buttons (View Details, Delete)
+        # Row 5: Sleek 4-Action Button Ribbon
         row_acts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(6))
+        
         btn_view = Button(
             text="View Details",
-            font_size='12sp',
+            font_size='11sp',
             bold=True,
-            size_hint_x=0.6,
+            size_hint_x=0.44,
             background_normal='',
-            background_color=get_color_from_hex("#334155"),
-            color=(1, 1, 1, 1)
+            background_color=get_color_from_hex("#1e293b"),
+            color=get_color_from_hex("#38bdf8")
         )
-        btn_view.bind(on_release=lambda x, rec=r: self.view_update_details(rec))
+        btn_view.bind(on_release=lambda x, rec=r: self.view_update_details(rec, sheet_name))
         row_acts.add_widget(btn_view)
 
-        btn_del = Button(
-            text="Delete",
-            font_size='12sp',
+        btn_copy = Button(
+            text="Copy",
+            font_size='11sp',
             bold=True,
-            size_hint_x=0.4,
+            size_hint_x=0.20,
             background_normal='',
-            background_color=get_color_from_hex("#dc2626"),
+            background_color=get_color_from_hex("#0284c7"),
             color=(1, 1, 1, 1)
+        )
+        def _quick_copy(b, rec=r):
+            self._copy_work_record_to_clipboard(rec, b)
+        btn_copy.bind(on_release=_quick_copy)
+        row_acts.add_widget(btn_copy)
+
+        btn_edit = Button(
+            text="Edit",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.18,
+            background_normal='',
+            background_color=get_color_from_hex("#4f46e5"),
+            color=(1, 1, 1, 1)
+        )
+        btn_edit.bind(on_release=lambda x, rec=r: self.open_edit_work_update_dialog(rec, sheet_name))
+        row_acts.add_widget(btn_edit)
+
+        btn_del = Button(
+            text="Del",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.18,
+            background_normal='',
+            background_color=get_color_from_hex("#7f1d1d"),
+            color=get_color_from_hex("#f87171")
         )
         btn_del.bind(on_release=lambda x, rid=rec_id, sm=sheet_name: self.delete_update_item(rid, sm))
         row_acts.add_widget(btn_del)
@@ -967,57 +1258,587 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         return card
 
-    def view_update_details(self, r):
-        content = BoxLayout(orientation='vertical', padding=dp(14), spacing=dp(8))
-        
+    def _copy_work_record_to_clipboard(self, r, btn=None):
+        date_v = str(r[1] or "")
+        proj_v = str(r[2] or "")
+        title_v = str(r[3] or "")
+        desc_v = str(r[4] or "")
+        hours_v = str(r[5] or "0").replace("h", "").strip()
+        status_v = str(r[6] or "")
+        login_v = str(r[8] or "")
+        logout_v = str(r[9] or "")
+
+        clip_text = (
+            f"Work Update - {date_v}\n"
+            f"* Task: {title_v} ({hours_v}h) [{status_v}]\n"
+            f"* Project: {proj_v}\n"
+            f"* Shift: {login_v} - {logout_v}\n\n"
+            f"{desc_v}"
+        )
+        if Clipboard is not None:
+            try:
+                Clipboard.copy(clip_text)
+            except Exception:
+                pass
+
+        if btn:
+            orig = btn.text
+            btn.text = "Copied!"
+            Clock.schedule_once(lambda dt: setattr(btn, 'text', orig), 1.5)
+        else:
+            self.show_popup("Copied", "Work update copied to clipboard!")
+
+    def view_update_details(self, r, sheet_name=None):
         d_v = str(r[1] or "")
         p_v = str(r[2] or "")
         t_v = str(r[3] or "")
         desc_v = str(r[4] or "No description provided.")
-        h_v = str(r[5] or "")
-        st_v = str(r[6] or "")
+        h_v = str(r[5] or "0").replace("h", "").strip()
+        st_v = str(r[6] or "Completed")
         rem_v = str(r[7] or "")
         login_v = str(r[8] or "")
         logout_v = str(r[9] or "")
+        lunch_v = str(r[10] or "")
+        tea_v = str(r[11] or "")
         created_v = str(r[12] or "")
 
-        details_text = (
-            f"[b]Task:[/b] {safe_escape_markup(t_v)}\n"
-            f"[b]Date:[/b] {d_v}   |   [b]Project:[/b] {safe_escape_markup(p_v)}\n"
-            f"[b]Hours:[/b] {h_v}h   |   [b]Status:[/b] {st_v}\n"
-            f"[b]Timings:[/b] {login_v} - {logout_v}\n"
-            f"[b]Logged At:[/b] {created_v}\n\n"
-            f"[b]Description / Notes:[/b]\n{safe_escape_markup(desc_v)}"
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.94, 0.88),
+            auto_dismiss=True
         )
-        if rem_v:
-            details_text += f"\n\n[b]Remarks:[/b] {safe_escape_markup(rem_v)}"
 
-        lbl = Label(
-            text=details_text,
+        modal = RoundedCard(
+            bg_hex="#0b132b",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#334155",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
+
+        # 1. Header Bar: Title + Close [X] Button
+        hdr_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(8))
+        lbl_head = Label(
+            text="[b]Work Update Details[/b]",
             markup=True,
+            font_size='16sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_x=0.86,
+            halign='left',
+            valign='middle'
+        )
+        lbl_head.bind(size=lbl_head.setter('text_size'))
+        hdr_row.add_widget(lbl_head)
+
+        btn_close_x = Button(
+            text="X",
             font_size='13sp',
-            color=(1, 1, 1, 1),
+            bold=True,
+            size_hint_x=None,
+            width=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close_x.bind(on_release=popup.dismiss)
+        hdr_row.add_widget(btn_close_x)
+        modal.add_widget(hdr_row)
+
+        # 2. Meta Pills Ribbon: Date, Project, Hours, Status
+        pills_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(26), spacing=dp(6))
+        
+        lbl_date_pill = Label(
+            text=f"[b]{d_v}[/b]",
+            markup=True,
+            font_size='12sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_x=0.35,
+            halign='left',
+            valign='middle'
+        )
+        lbl_date_pill.bind(size=lbl_date_pill.setter('text_size'))
+        pills_row.add_widget(lbl_date_pill)
+
+        lbl_proj_pill = Label(
+            text=f"[b]{safe_escape_markup(p_v)}[/b]",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex("#c084fc"),
+            size_hint_x=0.65,
+            halign='right',
+            valign='middle'
+        )
+        lbl_proj_pill.bind(size=lbl_proj_pill.setter('text_size'))
+        pills_row.add_widget(lbl_proj_pill)
+        modal.add_widget(pills_row)
+
+        # Row 2b: Hours Badge + Status Badge + Shift Timings
+        sub_pills = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(28), spacing=dp(6))
+        
+        badge_hours = RoundedCard(bg_hex="#064e3b", radius=[dp(6), dp(6), dp(6), dp(6)], size_hint_x=0.28, padding=[dp(4), dp(2)])
+        lbl_bh = Label(text=f"[b]{h_v} hrs[/b]", markup=True, font_size='12sp', color=get_color_from_hex("#34d399"), halign='center', valign='middle')
+        lbl_bh.bind(size=lbl_bh.setter('text_size'))
+        badge_hours.add_widget(lbl_bh)
+        sub_pills.add_widget(badge_hours)
+
+        st_colors = {
+            "completed": ("#065f46", "#10b981"),
+            "in progress": ("#78350f", "#f59e0b"),
+            "pending": ("#713f12", "#eab308"),
+            "leave": ("#831843", "#ec4899"),
+            "weekly off": ("#1e3a8a", "#60a5fa"),
+            "holiday": ("#7c2d12", "#fb923c")
+        }
+        bg_c, tx_c = st_colors.get(st_v.lower(), ("#1e293b", "#94a3b8"))
+        badge_st = RoundedCard(bg_hex=bg_c, radius=[dp(6), dp(6), dp(6), dp(6)], size_hint_x=0.34, padding=[dp(4), dp(2)])
+        lbl_bs = Label(text=f"[b]{st_v}[/b]", markup=True, font_size='11sp', color=get_color_from_hex(tx_c), halign='center', valign='middle')
+        lbl_bs.bind(size=lbl_bs.setter('text_size'))
+        badge_st.add_widget(lbl_bs)
+        sub_pills.add_widget(badge_st)
+
+        shift_str = f"{login_v} - {logout_v}" if (login_v or logout_v) else "Standard"
+        lbl_shift_info = Label(text=f"Shift: {shift_str}", font_size='11sp', color=get_color_from_hex("#94a3b8"), size_hint_x=0.38, halign='right', valign='middle')
+        lbl_shift_info.bind(size=lbl_shift_info.setter('text_size'))
+        sub_pills.add_widget(lbl_shift_info)
+        modal.add_widget(sub_pills)
+
+        # 3. Task Title Card
+        card_t = RoundedCard(bg_hex="#162238", radius=[dp(8), dp(8), dp(8), dp(8)], size_hint_y=None, padding=[dp(10), dp(8)], spacing=dp(2))
+        card_t.bind(minimum_height=card_t.setter('height'))
+        lbl_title_disp = Label(
+            text=f"[b]{safe_escape_markup(t_v)}[/b]",
+            markup=True,
+            font_size='15sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_y=None,
             halign='left',
             valign='top'
         )
-        lbl.bind(width=lambda s, w: s.setter('text_size')(s, (w, None)))
-        scroll = ScrollView(size_hint=(1, 1))
-        scroll.add_widget(lbl)
-        content.add_widget(scroll)
+        lbl_title_disp.bind(width=lambda s, w: s.setter('text_size')(s, (w, None)))
+        lbl_title_disp.bind(texture_size=lambda s, ts: setattr(s, 'height', max(dp(24), ts[1])))
+        card_t.add_widget(lbl_title_disp)
+        modal.add_widget(card_t)
 
-        btn_ok = Button(text="Close", font_size='14sp', size_hint_y=None, height=dp(42), background_normal='', background_color=get_color_from_hex("#2563eb"))
-        popup = Popup(title="Work Update Details", content=content, size_hint=(0.88, 0.65))
-        btn_ok.bind(on_release=popup.dismiss)
-        content.add_widget(btn_ok)
+        # 4. Scrollable Description / Notes Card
+        modal.add_widget(Label(text="[b]Description & Work Notes:[/b]", markup=True, font_size='12sp', color=get_color_from_hex("#38bdf8"), size_hint_y=None, height=dp(20), halign='left'))
+        
+        desc_card = RoundedCard(
+            bg_hex="#131e33",
+            radius=[dp(10), dp(10), dp(10), dp(10)],
+            border_hex="#1e293b",
+            orientation='vertical',
+            size_hint=(1, 1),
+            padding=[dp(10), dp(8)]
+        )
+        scroll_desc = ScrollView(size_hint=(1, 1), scroll_type=['content'], bar_width=dp(3))
+        
+        # Build formatted display text
+        body_text = safe_escape_markup(desc_v)
+        if rem_v:
+            body_text += f"\n\n[b][color=#f59e0b]Remarks:[/color][/b]\n{safe_escape_markup(rem_v)}"
+        if lunch_v or tea_v:
+            b_list = []
+            if lunch_v: b_list.append(f"Lunch: {lunch_v}")
+            if tea_v: b_list.append(f"Tea: {tea_v}")
+            body_text += f"\n\n[color=#94a3b8]Breaks: {' | '.join(b_list)}[/color]"
+        if created_v:
+            body_text += f"\n\n[color=#64748b]Logged timestamp: {created_v}[/color]"
+
+        lbl_desc_body = Label(
+            text=body_text,
+            markup=True,
+            font_size='13sp',
+            color=get_color_from_hex("#e2e8f0"),
+            size_hint_y=None,
+            halign='left',
+            valign='top'
+        )
+        lbl_desc_body.bind(width=lambda s, w: s.setter('text_size')(s, (w - dp(10), None)))
+        lbl_desc_body.bind(texture_size=lambda s, ts: setattr(s, 'height', max(dp(40), ts[1] + dp(10))))
+        scroll_desc.add_widget(lbl_desc_body)
+        desc_card.add_widget(scroll_desc)
+        modal.add_widget(desc_card)
+
+        # 5. Bottom Action Ribbon: Copy, Edit, Delete, Close
+        btn_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        
+        btn_copy = Button(
+            text="Copy Notes",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.32,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        btn_copy.bind(on_release=lambda x: self._copy_work_record_to_clipboard(r, btn_copy))
+        btn_bar.add_widget(btn_copy)
+
+        btn_edit = Button(
+            text="Edit Task",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.28,
+            background_normal='',
+            background_color=get_color_from_hex("#4f46e5"),
+            color=(1, 1, 1, 1)
+        )
+        def _on_edit_click(x):
+            popup.dismiss()
+            self.open_edit_work_update_dialog(r, sheet_name)
+        btn_edit.bind(on_release=_on_edit_click)
+        btn_bar.add_widget(btn_edit)
+
+        btn_del = Button(
+            text="Delete",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.20,
+            background_normal='',
+            background_color=get_color_from_hex("#dc2626"),
+            color=(1, 1, 1, 1)
+        )
+        def _on_del_click(x):
+            popup.dismiss()
+            self.delete_update_item(r[0], sheet_name)
+        btn_del.bind(on_release=_on_del_click)
+        btn_bar.add_widget(btn_del)
+
+        btn_close = Button(
+            text="Close",
+            font_size='12sp',
+            size_hint_x=0.20,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close.bind(on_release=popup.dismiss)
+        btn_bar.add_widget(btn_close)
+
+        modal.add_widget(btn_bar)
+        popup.content = modal
+        popup.open()
+
+    def open_edit_work_update_dialog(self, r, sheet_name=None):
+        rec_id = r[0]
+        cur_date = str(r[1] or "")
+        cur_proj = str(r[2] or "General Work")
+        cur_title = str(r[3] or "")
+        cur_desc = str(r[4] or "")
+        cur_hours = str(r[5] or "").replace("h", "").strip()
+        cur_status = str(r[6] or "Completed")
+        cur_rem = str(r[7] or "")
+        cur_login = str(r[8] or "")
+        cur_logout = str(r[9] or "")
+
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.94, 0.92),
+            auto_dismiss=False
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0b132b",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#334155",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
+
+        # Header
+        hdr = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(8))
+        lbl_head = Label(
+            text="[b]Edit Work Update[/b]",
+            markup=True,
+            font_size='16sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_x=0.86,
+            halign='left',
+            valign='middle'
+        )
+        lbl_head.bind(size=lbl_head.setter('text_size'))
+        hdr.add_widget(lbl_head)
+
+        btn_x = Button(
+            text="X",
+            font_size='13sp',
+            bold=True,
+            size_hint_x=None,
+            width=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_x.bind(on_release=popup.dismiss)
+        hdr.add_widget(btn_x)
+        modal.add_widget(hdr)
+
+        # Scrollable form container
+        scroll = ScrollView(size_hint=(1, 1), scroll_type=['content'], bar_width=dp(3))
+        form = GridLayout(cols=1, spacing=dp(8), size_hint_y=None, padding=[0, dp(4), 0, dp(8)])
+        form.bind(minimum_height=form.setter('height'))
+
+        # Field 1: Date & Today Button
+        form.add_widget(self._create_field_label("Date (YYYY-MM-DD):"))
+        d_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        in_date = TextInput(
+            text=cur_date,
+            multiline=False,
+            font_size='14sp',
+            size_hint_x=0.74,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        btn_set_today = Button(
+            text="Today",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.26,
+            background_normal='',
+            background_color=get_color_from_hex("#2563eb"),
+            color=(1, 1, 1, 1)
+        )
+        btn_set_today.bind(on_release=lambda x: setattr(in_date, 'text', datetime.date.today().strftime("%Y-%m-%d")))
+        d_row.add_widget(in_date)
+        d_row.add_widget(btn_set_today)
+        form.add_widget(d_row)
+
+        # Field 2: Project / Module
+        form.add_widget(self._create_field_label("Project / Module:"))
+        in_proj = TextInput(
+            text=cur_proj,
+            multiline=False,
+            font_size='14sp',
+            size_hint_y=None,
+            height=dp(42),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        form.add_widget(in_proj)
+
+        # Field 3: Task Title
+        form.add_widget(self._create_field_label("Task Title:"))
+        in_title = TextInput(
+            text=cur_title,
+            multiline=False,
+            font_size='14sp',
+            size_hint_y=None,
+            height=dp(42),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        form.add_widget(in_title)
+
+        # Field 4: Hours & Status
+        form.add_widget(self._create_field_label("Hours & Status:"))
+        h_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        in_hours = TextInput(
+            text=cur_hours,
+            hint_text="e.g. 8.0",
+            multiline=False,
+            font_size='14sp',
+            size_hint_x=0.45,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        sp_stat = Spinner(
+            text=cur_status if cur_status in ('Completed', 'In Progress', 'Pending', 'Leave', 'Weekly Off', 'Holiday') else 'Completed',
+            values=('Completed', 'In Progress', 'Pending', 'Leave', 'Weekly Off', 'Holiday'),
+            font_size='13sp',
+            size_hint_x=0.55,
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        h_row.add_widget(in_hours)
+        h_row.add_widget(sp_stat)
+        form.add_widget(h_row)
+
+        # Field 5: Shift Timings (Login - Logout)
+        form.add_widget(self._create_field_label("Shift Timings (Login - Logout):"))
+        t_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        in_login = TextInput(
+            text=cur_login,
+            hint_text="10:30 AM",
+            multiline=False,
+            font_size='14sp',
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        in_logout = TextInput(
+            text=cur_logout,
+            hint_text="07:30 PM",
+            multiline=False,
+            font_size='14sp',
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        t_row.add_widget(in_login)
+        t_row.add_widget(in_logout)
+        form.add_widget(t_row)
+
+        # Field 6: Work Description
+        form.add_widget(self._create_field_label("Work Description / Notes:"))
+        in_desc = TextInput(
+            text=cur_desc,
+            hint_text="Enter task description...",
+            multiline=True,
+            font_size='13sp',
+            size_hint_y=None,
+            height=dp(110),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            padding=[dp(10), dp(10)]
+        )
+        form.add_widget(in_desc)
+
+        scroll.add_widget(form)
+        modal.add_widget(scroll)
+
+        # Bottom Action Buttons
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+        
+        btn_save = Button(
+            text="Save Changes",
+            font_size='14sp',
+            bold=True,
+            size_hint_x=0.6,
+            background_normal='',
+            background_color=get_color_from_hex("#10b981"),
+            color=(1, 1, 1, 1)
+        )
+        def _do_save_edit(x):
+            new_date = in_date.text.strip()
+            new_proj = in_proj.text.strip() or "General Work"
+            new_title = in_title.text.strip()
+            new_desc = in_desc.text.strip()
+            new_hours = in_hours.text.strip()
+            new_st = sp_stat.text.strip()
+            new_login = in_login.text.strip()
+            new_logout = in_logout.text.strip()
+
+            if not new_title:
+                self.show_popup("Error", "Please enter a Task Title.")
+                return
+
+            if 'save_work_update' in globals():
+                ok = save_work_update(
+                    new_date, new_proj, new_title, new_desc, new_hours, new_st, cur_rem,
+                    login_time=new_login, logout_time=new_logout, record_id=rec_id
+                )
+                if ok is not False:
+                    popup.dismiss()
+                    self.show_popup("Success", "Work update updated successfully!")
+                    self.refresh_history_list()
+                    # Trigger background Google Sheet auto sync if configured
+                    settings = load_settings() if 'load_settings' in globals() else {}
+                    if settings.get("gsheet_auto_sync", False) and settings.get("gsheet_webapp_url"):
+                        try:
+                            dt = datetime.datetime.strptime(new_date, "%Y-%m-%d")
+                            m_name = dt.strftime("%B %Y")
+                        except Exception:
+                            m_name = datetime.datetime.now().strftime("%B %Y")
+                        threading.Thread(target=lambda: sync_google_sheet_month(m_name), daemon=True).start()
+                else:
+                    self.show_popup("Error", "Failed to update record in Excel file.")
+            else:
+                self.show_popup("Error", "Save engine not loaded.")
+
+        btn_save.bind(on_release=_do_save_edit)
+        btn_row.add_widget(btn_save)
+
+        btn_cancel = Button(
+            text="Cancel",
+            font_size='14sp',
+            size_hint_x=0.4,
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_row.add_widget(btn_cancel)
+
+        modal.add_widget(btn_row)
+        popup.content = modal
         popup.open()
 
     def delete_update_item(self, record_id, sheet_name):
-        content = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(10))
-        content.add_widget(Label(text="Are you sure you want to delete this work update?", font_size='14sp', color=(1, 1, 1, 1), halign='center'))
-        
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.88, 0.38),
+            auto_dismiss=True
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0f172a",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#ef4444",
+            orientation='vertical',
+            padding=[dp(16), dp(14), dp(16), dp(14)],
+            spacing=dp(10)
+        )
+
+        lbl_head = Label(
+            text="[b]Confirm Deletion[/b]",
+            markup=True,
+            font_size='16sp',
+            color=get_color_from_hex("#ef4444"),
+            size_hint_y=None,
+            height=dp(28),
+            halign='center',
+            valign='middle'
+        )
+        lbl_head.bind(size=lbl_head.setter('text_size'))
+        modal.add_widget(lbl_head)
+
+        lbl_body = Label(
+            text="Are you sure you want to delete this work update?\nThis action cannot be undone.",
+            font_size='13sp',
+            color=get_color_from_hex("#cbd5e1"),
+            size_hint=(1, 1),
+            halign='center',
+            valign='middle'
+        )
+        lbl_body.bind(size=lbl_body.setter('text_size'))
+        modal.add_widget(lbl_body)
+
         btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="Confirm Deletion", content=content, size_hint=(0.85, 0.35))
         
+        btn_confirm = Button(
+            text="Delete",
+            font_size='14sp',
+            bold=True,
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#dc2626"),
+            color=(1, 1, 1, 1)
+        )
         def _do_del(x):
             popup.dismiss()
             if 'delete_work_update' in globals():
@@ -1027,25 +1848,33 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     self.show_popup("Deleted", "Task record removed successfully!")
                 else:
                     self.show_popup("Error", "Could not delete record.")
-        
-        btn_confirm = Button(text="Delete", background_color=get_color_from_hex("#dc2626"), bold=True)
         btn_confirm.bind(on_release=_do_del)
-        btn_cancel = Button(text="Cancel", background_color=get_color_from_hex("#475569"))
-        btn_cancel.bind(on_release=popup.dismiss)
         btn_row.add_widget(btn_confirm)
+
+        btn_cancel = Button(
+            text="Cancel",
+            font_size='14sp',
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_cancel.bind(on_release=popup.dismiss)
         btn_row.add_widget(btn_cancel)
-        content.add_widget(btn_row)
-        
+
+        modal.add_widget(btn_row)
+        popup.content = modal
         popup.open()
 
     # =========================================================================
-    # TAB 3: WORK & PERSONAL NOTES VIEW
+    # TAB 3: WORK & PERSONAL NOTES VIEW (MODERN MOBILE UI)
     # =========================================================================
     def build_notes_view(self):
         root = BoxLayout(orientation='vertical', padding=[dp(8), dp(6), dp(8), dp(6)], spacing=dp(6))
 
-        # Top Bar: Search Input + Cloud Sync + New Note Button
+        # 1. Top Bar: Search Input + Cloud Sync + New Note Button
         top_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        
         self.in_notes_search = TextInput(
             hint_text="Search notes by title, tag, or content...",
             multiline=False,
@@ -1057,7 +1886,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             hint_text_color=get_color_from_hex("#64748b"),
             padding=[dp(10), dp(10)]
         )
-        self.in_notes_search.bind(text=lambda s, val: self.refresh_notes_list())
+        self.in_notes_search.bind(text=lambda s, val: self._on_notes_search_changed(val))
         top_row.add_widget(self.in_notes_search)
 
         btn_cloud_sync = Button(
@@ -1085,7 +1914,39 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         top_row.add_widget(btn_add_note)
         root.add_widget(top_row)
 
-        # Quick Template Action Ribbon (1-tap note creation)
+        # 2. Executive 3-Card KPI Dashboard Strip for Notes
+        kpi_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(52), spacing=dp(6))
+        
+        self.card_kpi_notes_total = RoundedCard(bg_hex="#131e33", radius=[dp(10), dp(10), dp(10), dp(10)], border_hex="#334155", orientation='vertical', size_hint_x=0.33, padding=[dp(6), dp(4), dp(6), dp(4)], spacing=dp(1))
+        self.lbl_kpi_notes_val = Label(text="0", font_size='16sp', bold=True, color=(1, 1, 1, 1), halign='center', valign='middle')
+        self.lbl_kpi_notes_val.bind(size=self.lbl_kpi_notes_val.setter('text_size'))
+        lbl_kpi_notes_sub = Label(text="Total Notes", font_size='10sp', color=get_color_from_hex("#94a3b8"), halign='center', valign='middle')
+        lbl_kpi_notes_sub.bind(size=lbl_kpi_notes_sub.setter('text_size'))
+        self.card_kpi_notes_total.add_widget(self.lbl_kpi_notes_val)
+        self.card_kpi_notes_total.add_widget(lbl_kpi_notes_sub)
+        kpi_row.add_widget(self.card_kpi_notes_total)
+
+        self.card_kpi_notes_todos = RoundedCard(bg_hex="#131e33", radius=[dp(10), dp(10), dp(10), dp(10)], border_hex="#334155", orientation='vertical', size_hint_x=0.34, padding=[dp(6), dp(4), dp(6), dp(4)], spacing=dp(1))
+        self.lbl_kpi_todos_val = Label(text="0/0", font_size='16sp', bold=True, color=get_color_from_hex("#34d399"), halign='center', valign='middle')
+        self.lbl_kpi_todos_val.bind(size=self.lbl_kpi_todos_val.setter('text_size'))
+        lbl_kpi_todos_sub = Label(text="Checklist Done", font_size='10sp', color=get_color_from_hex("#94a3b8"), halign='center', valign='middle')
+        lbl_kpi_todos_sub.bind(size=lbl_kpi_todos_sub.setter('text_size'))
+        self.card_kpi_notes_todos.add_widget(self.lbl_kpi_todos_val)
+        self.card_kpi_notes_todos.add_widget(lbl_kpi_todos_sub)
+        kpi_row.add_widget(self.card_kpi_notes_todos)
+
+        self.card_kpi_notes_pinned = RoundedCard(bg_hex="#131e33", radius=[dp(10), dp(10), dp(10), dp(10)], border_hex="#334155", orientation='vertical', size_hint_x=0.33, padding=[dp(6), dp(4), dp(6), dp(4)], spacing=dp(1))
+        self.lbl_kpi_pinned_val = Label(text="0", font_size='16sp', bold=True, color=get_color_from_hex("#f59e0b"), halign='center', valign='middle')
+        self.lbl_kpi_pinned_val.bind(size=self.lbl_kpi_pinned_val.setter('text_size'))
+        lbl_kpi_pinned_sub = Label(text="Pinned", font_size='10sp', color=get_color_from_hex("#94a3b8"), halign='center', valign='middle')
+        lbl_kpi_pinned_sub.bind(size=lbl_kpi_pinned_sub.setter('text_size'))
+        self.card_kpi_notes_pinned.add_widget(self.lbl_kpi_pinned_val)
+        self.card_kpi_notes_pinned.add_widget(lbl_kpi_pinned_sub)
+        kpi_row.add_widget(self.card_kpi_notes_pinned)
+
+        root.add_widget(kpi_row)
+
+        # 3. Quick 1-Tap Template Action Ribbon
         tpl_scroll = ScrollView(size_hint_y=None, height=dp(30), do_scroll_x=True, do_scroll_y=False, bar_width=0)
         tpl_box = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(30), spacing=dp(6), padding=[dp(2), 0, dp(2), 0])
         tpl_box.bind(minimum_width=tpl_box.setter('width'))
@@ -1116,10 +1977,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         tpl_scroll.add_widget(tpl_box)
         root.add_widget(tpl_scroll)
 
-        # Category Filter Bar with Live Counts
+        # 4. Category Filter Bar with Live Counts
         self.current_note_filter = "All"
-        cat_scroll = ScrollView(size_hint_y=None, height=dp(34), do_scroll_x=True, do_scroll_y=False, bar_width=0)
-        self.cat_box = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(34), spacing=dp(6), padding=[dp(2), 0, dp(2), 0])
+        cat_scroll = ScrollView(size_hint_y=None, height=dp(32), do_scroll_x=True, do_scroll_y=False, bar_width=0)
+        self.cat_box = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(32), spacing=dp(6), padding=[dp(2), 0, dp(2), 0])
         self.cat_box.bind(minimum_width=self.cat_box.setter('width'))
         self.note_categories = ["All", "Work", "Meeting", "Ideas", "Todo", "Urgent", "Personal"]
         self.cat_buttons = {}
@@ -1140,44 +2001,42 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         cat_scroll.add_widget(self.cat_box)
         root.add_widget(cat_scroll)
 
-        # Summary & Stat Strip
-        stat_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(22), spacing=dp(6), padding=[dp(4), 0, dp(4), 0])
-        self.lbl_notes_stat = Label(
-            text="0 Notes",
-            font_size='11sp',
-            color=get_color_from_hex("#94a3b8"),
-            size_hint_x=0.75,
-            halign='left',
-            valign='middle'
-        )
-        self.lbl_notes_stat.bind(size=self.lbl_notes_stat.setter('text_size'))
-        stat_row.add_widget(self.lbl_notes_stat)
-
+        # 5. Search Bar Clear Action Row (hidden when empty)
         self.btn_clear_notes_search = Button(
-            text="Clear Search",
+            text="Clear Search Query",
             font_size='10sp',
             bold=True,
-            size_hint_x=0.25,
+            size_hint_y=None,
+            height=dp(24),
             opacity=0,
             disabled=True,
             background_normal='',
             background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
         )
-        def _clear_s(x):
-            self.in_notes_search.text = ""
-        self.btn_clear_notes_search.bind(on_release=_clear_s)
-        stat_row.add_widget(self.btn_clear_notes_search)
-        root.add_widget(stat_row)
+        self.btn_clear_notes_search.bind(on_release=lambda x: self._clear_notes_search())
+        root.add_widget(self.btn_clear_notes_search)
 
-        # Notes List ScrollView
-        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False, bar_width=0, scroll_type=['content'])
+        # 6. Notes List ScrollView
+        scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False, bar_width=dp(3), scroll_type=['content'])
         self.notes_list_layout = GridLayout(cols=1, spacing=dp(8), size_hint_y=None, padding=[0, dp(4), 0, dp(12)])
         self.notes_list_layout.bind(minimum_height=self.notes_list_layout.setter('height'))
         scroll.add_widget(self.notes_list_layout)
         root.add_widget(scroll)
 
         return root
+
+    def _on_notes_search_changed(self, val):
+        if hasattr(self, 'btn_clear_notes_search') and self.btn_clear_notes_search:
+            has_text = bool(val.strip())
+            self.btn_clear_notes_search.opacity = 1 if has_text else 0
+            self.btn_clear_notes_search.disabled = not has_text
+            self.btn_clear_notes_search.height = dp(24) if has_text else dp(0)
+        self.refresh_notes_list()
+
+    def _clear_notes_search(self):
+        if hasattr(self, 'in_notes_search') and self.in_notes_search:
+            self.in_notes_search.text = ""
 
     def _set_note_filter(self, cat):
         self.current_note_filter = cat
@@ -1200,14 +2059,39 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         search_q = self.in_notes_search.text.strip().lower() if hasattr(self, 'in_notes_search') and self.in_notes_search else ""
         cur_filter = getattr(self, 'current_note_filter', 'All')
 
-        # Update category counts
+        # Calculate metrics for KPI strip
         cat_counts = {c: 0 for c in getattr(self, 'note_categories', ["All"])}
         cat_counts["All"] = len(notes)
+        pinned_cnt = 0
+        total_checklist_tasks = 0
+        done_checklist_tasks = 0
+
         for n in notes:
             t = str(n.get("tag", "Work")).title()
             if t in cat_counts:
                 cat_counts[t] += 1
+            if n.get("is_pinned", False):
+                pinned_cnt += 1
+            
+            # Count checklist stats
+            c_text = n.get("content", "")
+            for line in c_text.splitlines():
+                ls = line.strip()
+                if ls.startswith("- [ ]") or ls.startswith("[ ]"):
+                    total_checklist_tasks += 1
+                elif ls.startswith("- [x]") or ls.startswith("- [X]") or ls.startswith("[x]") or ls.startswith("[X]"):
+                    total_checklist_tasks += 1
+                    done_checklist_tasks += 1
 
+        # Update KPI Cards
+        if hasattr(self, 'lbl_kpi_notes_val') and self.lbl_kpi_notes_val:
+            self.lbl_kpi_notes_val.text = str(len(notes))
+        if hasattr(self, 'lbl_kpi_todos_val') and self.lbl_kpi_todos_val:
+            self.lbl_kpi_todos_val.text = f"{done_checklist_tasks}/{total_checklist_tasks}" if total_checklist_tasks > 0 else "0/0"
+        if hasattr(self, 'lbl_kpi_pinned_val') and self.lbl_kpi_pinned_val:
+            self.lbl_kpi_pinned_val.text = str(pinned_cnt)
+
+        # Update category buttons text & width
         for c, btn in getattr(self, 'cat_buttons', {}).items():
             cnt = cat_counts.get(c, 0)
             btn.text = f"{c} ({cnt})"
@@ -1230,22 +2114,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Sort: pinned notes first, then latest updated/created
         filtered.sort(key=lambda x: (not x.get("is_pinned", False), x.get("updated_at", x.get("created_at", ""))), reverse=False)
 
-        # Update search clear button & stats
-        pinned_cnt = sum(1 for n in notes if n.get("is_pinned", False))
-        if hasattr(self, 'lbl_notes_stat') and self.lbl_notes_stat:
-            stat_txt = f"{len(filtered)} of {len(notes)} Notes" if search_q or cur_filter != "All" else f"{len(notes)} Notes"
-            if pinned_cnt > 0:
-                stat_txt += f" | {pinned_cnt} Pinned"
-            self.lbl_notes_stat.text = stat_txt
-
-        if hasattr(self, 'btn_clear_notes_search') and self.btn_clear_notes_search:
-            self.btn_clear_notes_search.opacity = 1 if search_q else 0
-            self.btn_clear_notes_search.disabled = not bool(search_q)
-
         if not filtered:
             empty_card = RoundedCard(
-                bg_hex="#1e293b",
-                radius=[dp(10), dp(10), dp(10), dp(10)],
+                bg_hex="#131e33",
+                radius=[dp(12), dp(12), dp(12), dp(12)],
+                border_hex="#334155",
                 orientation='vertical',
                 size_hint_y=None,
                 height=dp(160),
@@ -1263,7 +2136,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             )
             empty_card.add_widget(lbl_e_title)
 
-            sub_msg = f"No notes match '{search_q}'. Tap 'Clear Search' to view all notes." if search_q else "Capture quick standup drafts, meeting minutes, sprint tasks, or team memos."
+            sub_msg = f"No notes match '{search_q}'. Tap 'Clear Search' to view all notes." if search_q else "Capture quick standup drafts, meeting minutes, sprint tasks, or checklists."
             lbl_e_sub = Label(
                 text=sub_msg,
                 font_size='12sp',
@@ -1316,13 +2189,15 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         accent_color = tag_colors.get(tag.lower(), "#64748b")
 
         card = RoundedCard(
-            bg_hex="#1e293b",
-            radius=[dp(10), dp(10), dp(10), dp(10)],
+            bg_hex="#162238",
+            radius=[dp(12), dp(12), dp(12), dp(12)],
+            border_hex="#f59e0b" if is_pinned else "#334155",
             orientation='vertical',
             size_hint_y=None,
             padding=[dp(12), dp(10), dp(12), dp(10)],
             spacing=dp(6)
         )
+        card.bind(minimum_height=card.setter('height'))
 
         # Header Row: [PIN] Badge + Title + Category Pill
         row1 = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(26), spacing=dp(6))
@@ -1331,9 +2206,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         lbl_title = Label(
             text=f"{pin_prefix}[b]{safe_escape_markup(title)}[/b]",
             markup=True,
-            font_size='14sp',
+            font_size='15sp',
             color=get_color_from_hex("#f8fafc"),
-            size_hint_x=0.70,
+            size_hint_x=0.72,
             halign='left',
             valign='middle',
             shorten=True,
@@ -1342,79 +2217,91 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         lbl_title.bind(size=lbl_title.setter('text_size'))
         row1.add_widget(lbl_title)
 
-        lbl_tag_pill = Button(
+        lbl_tag_pill = Label(
             text=f"[b]{safe_escape_markup(tag.upper())}[/b]",
             markup=True,
             font_size='10sp',
-            bold=True,
-            size_hint=(None, None),
-            size=(dp(max(56, len(tag) * 8 + 16)), dp(22)),
-            background_normal='',
-            background_color=get_color_from_hex(accent_color),
-            color=(1, 1, 1, 1),
-            disabled=True,
-            disabled_color=(1, 1, 1, 1)
+            color=get_color_from_hex(accent_color),
+            size_hint_x=0.28,
+            halign='right',
+            valign='middle'
         )
+        lbl_tag_pill.bind(size=lbl_tag_pill.setter('text_size'))
         row1.add_widget(lbl_tag_pill)
         card.add_widget(row1)
 
-        # Content Snippet Preview
+        # Check for checklist progress
         c_lines = content.strip().splitlines() if content else []
-        preview_text = "\n".join(c_lines[:3]) if len(c_lines) > 3 else content.strip()
-        if len(c_lines) > 3 or len(content) > 160:
-            preview_text = (preview_text[:150] + "...") if len(preview_text) > 150 else (preview_text + "\n...")
+        chk_total = 0
+        chk_done = 0
+        for l in c_lines:
+            ls = l.strip()
+            if ls.startswith("- [ ]") or ls.startswith("[ ]"):
+                chk_total += 1
+            elif ls.startswith("- [x]") or ls.startswith("- [X]") or ls.startswith("[x]") or ls.startswith("[X]"):
+                chk_total += 1
+                chk_done += 1
 
-        content_h = dp(0)
-        if preview_text:
-            lbl_cnt = Label(
-                text=safe_escape_markup(preview_text),
-                font_size='12sp',
-                color=get_color_from_hex("#cbd5e1"),
-                size_hint_y=None,
+        if chk_total > 0:
+            pct = int((chk_done / chk_total) * 100) if chk_total else 0
+            prog_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(20), spacing=dp(6))
+            lbl_prog = Label(
+                text=f"[b][x] {chk_done}/{chk_total} Tasks Completed ({pct}%)[/b]",
+                markup=True,
+                font_size='11sp',
+                color=get_color_from_hex("#34d399" if chk_done == chk_total else "#38bdf8"),
+                size_hint_x=0.75,
                 halign='left',
-                valign='top'
+                valign='middle'
             )
-            def _bind_cnt(lbl, *args):
-                lbl.text_size = (lbl.width, None)
-                lbl.texture_update()
-                lbl.height = max(dp(22), lbl.texture_size[1] + dp(4))
-                card.height = dp(26) + lbl.height + dp(32) + dp(36)
-            lbl_cnt.bind(width=_bind_cnt)
-            lbl_cnt.height = dp(min(70, max(24, len(preview_text.splitlines()) * 18)))
-            content_h = lbl_cnt.height
-            card.add_widget(lbl_cnt)
+            lbl_prog.bind(size=lbl_prog.setter('text_size'))
+            prog_row.add_widget(lbl_prog)
+            card.add_widget(prog_row)
 
-        # Bottom Action Bar
+        # Content Snippet Preview inside Dark Inset Box
+        preview_text = "\n".join(c_lines[:3]) if len(c_lines) > 3 else content.strip()
+        if len(c_lines) > 3 or len(content) > 140:
+            preview_text = (preview_text[:130] + "...") if len(preview_text) > 130 else (preview_text + "\n...")
+
+        if preview_text:
+            desc_card = RoundedCard(
+                bg_hex="#0b1322",
+                radius=[dp(6), dp(6), dp(6), dp(6)],
+                size_hint_y=None,
+                height=dp(42),
+                padding=[dp(8), dp(4), dp(8), dp(4)]
+            )
+            lbl_desc = Label(
+                text=safe_escape_markup(preview_text),
+                font_size='11sp',
+                color=get_color_from_hex("#94a3b8"),
+                halign='left',
+                valign='middle'
+            )
+            lbl_desc.bind(size=lbl_desc.setter('text_size'))
+            desc_card.add_widget(lbl_desc)
+            card.add_widget(desc_card)
+
+        # Bottom Action Ribbon: Open, Copy, Edit, Pin, Share, Del
         row_acts = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(5))
         
-        lbl_time = Label(
-            text=time_str,
-            font_size='10sp',
-            color=get_color_from_hex("#64748b"),
-            size_hint_x=0.30,
-            halign='left',
-            valign='middle'
-        )
-        lbl_time.bind(size=lbl_time.setter('text_size'))
-        row_acts.add_widget(lbl_time)
-
-        btn_edit = Button(
-            text="Edit",
+        btn_open = Button(
+            text="Open",
             font_size='11sp',
             bold=True,
-            size_hint_x=0.17,
+            size_hint_x=0.22,
             background_normal='',
-            background_color=get_color_from_hex("#2563eb"),
-            color=(1, 1, 1, 1)
+            background_color=get_color_from_hex("#1e293b"),
+            color=get_color_from_hex("#38bdf8")
         )
-        btn_edit.bind(on_release=lambda x, n=note: self.open_note_editor(n))
-        row_acts.add_widget(btn_edit)
+        btn_open.bind(on_release=lambda x, n=note: self.view_note_details(n))
+        row_acts.add_widget(btn_open)
 
         btn_copy = Button(
             text="Copy",
             font_size='11sp',
             bold=True,
-            size_hint_x=0.17,
+            size_hint_x=0.18,
             background_normal='',
             background_color=get_color_from_hex("#0284c7"),
             color=(1, 1, 1, 1)
@@ -1430,23 +2317,23 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_copy.bind(on_release=_quick_copy)
         row_acts.add_widget(btn_copy)
 
-        btn_share = Button(
-            text="Share",
+        btn_edit = Button(
+            text="Edit",
             font_size='11sp',
             bold=True,
             size_hint_x=0.18,
             background_normal='',
-            background_color=get_color_from_hex("#8b5cf6"),
+            background_color=get_color_from_hex("#4f46e5"),
             color=(1, 1, 1, 1)
         )
-        btn_share.bind(on_release=lambda x, n=note: self.share_note_dialog(n))
-        row_acts.add_widget(btn_share)
+        btn_edit.bind(on_release=lambda x, n=note: self.open_note_editor(n))
+        row_acts.add_widget(btn_edit)
 
         btn_pin = Button(
             text="Unpin" if is_pinned else "Pin",
             font_size='11sp',
             bold=True,
-            size_hint_x=0.18,
+            size_hint_x=0.16,
             background_normal='',
             background_color=get_color_from_hex("#f59e0b" if is_pinned else "#334155"),
             color=(1, 1, 1, 1)
@@ -1454,40 +2341,385 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_pin.bind(on_release=lambda x, nid=note_id: self.toggle_note_pin(nid))
         row_acts.add_widget(btn_pin)
 
+        btn_share = Button(
+            text="Share",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.16,
+            background_normal='',
+            background_color=get_color_from_hex("#8b5cf6"),
+            color=(1, 1, 1, 1)
+        )
+        btn_share.bind(on_release=lambda x, n=note: self.share_note_dialog(n))
+        row_acts.add_widget(btn_share)
+
         btn_del = Button(
             text="Del",
             font_size='11sp',
             bold=True,
-            size_hint_x=0.15,
+            size_hint_x=0.14,
             background_normal='',
-            background_color=get_color_from_hex("#dc2626"),
-            color=(1, 1, 1, 1)
+            background_color=get_color_from_hex("#7f1d1d"),
+            color=get_color_from_hex("#f87171")
         )
         btn_del.bind(on_release=lambda x, nid=note_id: self.delete_note_item(nid))
         row_acts.add_widget(btn_del)
 
         card.add_widget(row_acts)
-
-        total_h = dp(26) + content_h + dp(32) + dp(28)
-        card.height = max(dp(96), total_h)
         return card
 
+    # =========================================================================
+    # FULL NOTE DETAILS & INTERACTIVE CHECKLIST READER
+    # =========================================================================
+    def view_note_details(self, note):
+        note_id = note.get("id")
+        title = note.get("title", "Untitled Note")
+        content = note.get("content", "")
+        tag = note.get("tag", "Work")
+        is_pinned = note.get("is_pinned", False)
+        time_str = note.get("updated_at") or note.get("created_at") or ""
+
+        tag_colors = {
+            "work": "#3b82f6",
+            "meeting": "#8b5cf6",
+            "ideas": "#f59e0b",
+            "todo": "#10b981",
+            "urgent": "#ef4444",
+            "personal": "#ec4899"
+        }
+        accent_color = tag_colors.get(tag.lower(), "#64748b")
+
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.94, 0.88),
+            auto_dismiss=True
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0b132b",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#334155",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
+
+        # 1. Header Bar: Tag Badge + Pinned + Close [X]
+        hdr = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(8))
+        
+        lbl_tag_badge = Label(
+            text=f"[b]{tag.upper()}[/b]",
+            markup=True,
+            font_size='12sp',
+            color=get_color_from_hex(accent_color),
+            size_hint_x=0.30,
+            halign='left',
+            valign='middle'
+        )
+        lbl_tag_badge.bind(size=lbl_tag_badge.setter('text_size'))
+        hdr.add_widget(lbl_tag_badge)
+
+        pin_str = "[color=#f59e0b][b][PINNED][/b][/color]  " if is_pinned else ""
+        lbl_time_hdr = Label(
+            text=f"{pin_str}{time_str}",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex("#94a3b8"),
+            size_hint_x=0.56,
+            halign='right',
+            valign='middle'
+        )
+        lbl_time_hdr.bind(size=lbl_time_hdr.setter('text_size'))
+        hdr.add_widget(lbl_time_hdr)
+
+        btn_x = Button(
+            text="X",
+            font_size='13sp',
+            bold=True,
+            size_hint_x=None,
+            width=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_x.bind(on_release=popup.dismiss)
+        hdr.add_widget(btn_x)
+        modal.add_widget(hdr)
+
+        # 2. Large Note Title
+        card_t = RoundedCard(bg_hex="#162238", radius=[dp(8), dp(8), dp(8), dp(8)], size_hint_y=None, padding=[dp(10), dp(8)], spacing=dp(2))
+        card_t.bind(minimum_height=card_t.setter('height'))
+        lbl_title_disp = Label(
+            text=f"[b]{safe_escape_markup(title)}[/b]",
+            markup=True,
+            font_size='16sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_y=None,
+            halign='left',
+            valign='top'
+        )
+        lbl_title_disp.bind(width=lambda s, w: s.setter('text_size')(s, (w, None)))
+        lbl_title_disp.bind(texture_size=lambda s, ts: setattr(s, 'height', max(dp(26), ts[1])))
+        card_t.add_widget(lbl_title_disp)
+        modal.add_widget(card_t)
+
+        # 3. Interactive Checklist and Formatted Content Container
+        scroll_content = ScrollView(size_hint=(1, 1), scroll_type=['content'], bar_width=dp(3))
+        content_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(6), padding=[dp(4), dp(4), dp(4), dp(8)])
+        content_box.bind(minimum_height=content_box.setter('height'))
+
+        # Parse lines for interactive checklist items
+        lines = content.splitlines() if content else []
+        has_chk = any(l.strip().startswith(("- [ ]", "- [x]", "- [X]", "[ ]", "[x]", "[X]")) for l in lines)
+
+        if has_chk:
+            chk_box = RoundedCard(bg_hex="#131e33", radius=[dp(8), dp(8), dp(8), dp(8)], orientation='vertical', size_hint_y=None, spacing=dp(4), padding=[dp(8), dp(6)])
+            chk_box.bind(minimum_height=chk_box.setter('height'))
+            
+            lbl_chk_header = Label(text="[b]Interactive Checklist (Tap to toggle):[/b]", markup=True, font_size='12sp', color=get_color_from_hex("#38bdf8"), size_hint_y=None, height=dp(22), halign='left')
+            lbl_chk_header.bind(size=lbl_chk_header.setter('text_size'))
+            chk_box.add_widget(lbl_chk_header)
+
+            non_chk_lines = []
+
+            for l_idx, line in enumerate(lines):
+                ls = line.strip()
+                is_todo = ls.startswith(("- [ ]", "[ ]"))
+                is_done = ls.startswith(("- [x]", "- [X]", "[x]", "[X]"))
+
+                if is_todo or is_done:
+                    # Extract item text
+                    if ls.startswith("- [ ]") or ls.startswith("- [x]") or ls.startswith("- [X]"):
+                        item_text = ls[5:].strip()
+                    else:
+                        item_text = ls[3:].strip()
+
+                    row_chk = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(6))
+                    
+                    btn_toggle = Button(
+                        text="[X]" if is_done else "[ ]",
+                        font_size='13sp',
+                        bold=True,
+                        size_hint_x=None,
+                        width=dp(38),
+                        background_normal='',
+                        background_color=get_color_from_hex("#10b981" if is_done else "#334155"),
+                        color=(1, 1, 1, 1)
+                    )
+                    
+                    lbl_item = Label(
+                        text=f"[color=#64748b]{safe_escape_markup(item_text)}[/color]" if is_done else f"[color=#f8fafc]{safe_escape_markup(item_text)}[/color]",
+                        markup=True,
+                        font_size='13sp',
+                        size_hint_x=0.88,
+                        halign='left',
+                        valign='middle'
+                    )
+                    lbl_item.bind(size=lbl_item.setter('text_size'))
+
+                    def _make_toggle(idx=l_idx, done=is_done):
+                        def _handler(b):
+                            popup.dismiss()
+                            self.toggle_note_checklist_item(note_id, idx, done)
+                        return _handler
+
+                    btn_toggle.bind(on_release=_make_toggle(l_idx, is_done))
+                    row_chk.add_widget(btn_toggle)
+                    row_chk.add_widget(lbl_item)
+                    chk_box.add_widget(row_chk)
+                else:
+                    if line.strip():
+                        non_chk_lines.append(line)
+
+            content_box.add_widget(chk_box)
+
+            if non_chk_lines:
+                lbl_extra = Label(
+                    text=safe_escape_markup("\n".join(non_chk_lines)),
+                    markup=True,
+                    font_size='13sp',
+                    color=get_color_from_hex("#cbd5e1"),
+                    size_hint_y=None,
+                    halign='left',
+                    valign='top'
+                )
+                lbl_extra.bind(width=lambda s, w: s.setter('text_size')(s, (w - dp(10), None)))
+                lbl_extra.bind(texture_size=lambda s, ts: setattr(s, 'height', max(dp(30), ts[1] + dp(10))))
+                content_box.add_widget(lbl_extra)
+        else:
+            # Full formatted text reader card
+            card_body = RoundedCard(bg_hex="#131e33", radius=[dp(10), dp(10), dp(10), dp(10)], border_hex="#1e293b", size_hint_y=None, padding=[dp(10), dp(8)])
+            card_body.bind(minimum_height=card_body.setter('height'))
+            
+            lbl_body = Label(
+                text=safe_escape_markup(content or "No notes content."),
+                markup=True,
+                font_size='13sp',
+                color=get_color_from_hex("#e2e8f0"),
+                size_hint_y=None,
+                halign='left',
+                valign='top'
+            )
+            lbl_body.bind(width=lambda s, w: s.setter('text_size')(s, (w - dp(10), None)))
+            lbl_body.bind(texture_size=lambda s, ts: setattr(s, 'height', max(dp(60), ts[1] + dp(12))))
+            card_body.add_widget(lbl_body)
+            content_box.add_widget(card_body)
+
+        scroll_content.add_widget(content_box)
+        modal.add_widget(scroll_content)
+
+        # 4. Action Ribbon at bottom
+        btn_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(42), spacing=dp(6))
+        
+        btn_copy = Button(
+            text="Copy",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.22,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        def _cp(b):
+            txt = f"{title}\n\n{content}".strip()
+            if Clipboard is not None:
+                try:
+                    Clipboard.copy(txt)
+                except Exception:
+                    pass
+            b.text = "Copied!"
+            Clock.schedule_once(lambda dt: setattr(b, 'text', "Copy"), 1.5)
+        btn_copy.bind(on_release=_cp)
+        btn_bar.add_widget(btn_copy)
+
+        btn_edit = Button(
+            text="Edit Note",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.26,
+            background_normal='',
+            background_color=get_color_from_hex("#4f46e5"),
+            color=(1, 1, 1, 1)
+        )
+        def _ed(b):
+            popup.dismiss()
+            self.open_note_editor(note)
+        btn_edit.bind(on_release=_ed)
+        btn_bar.add_widget(btn_edit)
+
+        btn_share = Button(
+            text="Share",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.20,
+            background_normal='',
+            background_color=get_color_from_hex("#8b5cf6"),
+            color=(1, 1, 1, 1)
+        )
+        def _sh(b):
+            popup.dismiss()
+            self.share_note_dialog(note)
+        btn_share.bind(on_release=_sh)
+        btn_bar.add_widget(btn_share)
+
+        btn_pin_act = Button(
+            text="Unpin" if is_pinned else "Pin",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.18,
+            background_normal='',
+            background_color=get_color_from_hex("#f59e0b" if is_pinned else "#334155"),
+            color=(1, 1, 1, 1)
+        )
+        def _pn(b):
+            popup.dismiss()
+            self.toggle_note_pin(note_id)
+        btn_pin_act.bind(on_release=_pn)
+        btn_bar.add_widget(btn_pin_act)
+
+        btn_close = Button(
+            text="Close",
+            font_size='12sp',
+            size_hint_x=0.14,
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close.bind(on_release=popup.dismiss)
+        btn_bar.add_widget(btn_close)
+
+        modal.add_widget(btn_bar)
+        popup.content = modal
+        popup.open()
+
+    def toggle_note_checklist_item(self, note_id, line_idx, is_currently_done):
+        notes = load_notes() if 'load_notes' in globals() else []
+        target_note = None
+        for n in notes:
+            if n.get("id") == note_id:
+                target_note = n
+                break
+        if not target_note:
+            return
+
+        lines = target_note.get("content", "").splitlines()
+        if 0 <= line_idx < len(lines):
+            orig_line = lines[line_idx]
+            if is_currently_done:
+                # Turn into unchecked: - [ ]
+                lines[line_idx] = orig_line.replace("- [x]", "- [ ]").replace("- [X]", "- [ ]").replace("[x]", "[ ]").replace("[X]", "[ ]")
+            else:
+                # Turn into checked: - [x]
+                lines[line_idx] = orig_line.replace("- [ ]", "- [x]").replace("[ ]", "[x]")
+
+            target_note["content"] = "\n".join(lines)
+            target_note["updated_at"] = datetime.datetime.now().strftime("%b %d, %I:%M %p")
+
+            if 'save_notes' in globals():
+                save_notes(notes)
+
+            self.refresh_notes_list()
+            self.auto_sync_notes_to_gsheet()
+            self.view_note_details(target_note)
+
+    # =========================================================================
+    # NOTE EDITOR MODAL WITH RICH QUICK FORMATTING TOOLS
+    # =========================================================================
     def open_note_editor(self, note=None, initial_title="", initial_content="", initial_tag="Work", initial_pin=False):
         is_edit = note is not None
         note_id = note.get("id") if is_edit else uuid.uuid4().hex[:10]
         curr_tag = [note.get("tag", initial_tag) if is_edit else initial_tag]
         curr_pin = [note.get("is_pinned", initial_pin) if is_edit else initial_pin]
 
-        root_modal = BoxLayout(orientation='vertical', padding=[dp(10), dp(8), dp(10), dp(8)], spacing=dp(8))
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.94, 0.92),
+            auto_dismiss=False
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0b132b",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#334155",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
 
         # Title Bar with ASCII 'X' Close button
-        title_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(36), spacing=dp(8))
+        title_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(8))
         lbl_modal_title = Label(
             text=f"[b]{'Edit Note' if is_edit else 'Create New Note'}[/b]",
             markup=True,
-            font_size='15sp',
+            font_size='16sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.88,
+            size_hint_x=0.86,
             halign='left',
             valign='middle'
         )
@@ -1498,17 +2730,18 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="X",
             font_size='13sp',
             bold=True,
-            size_hint=(None, None),
-            size=(dp(30), dp(30)),
+            size_hint_x=None,
+            width=dp(34),
             background_normal='',
-            background_color=get_color_from_hex("#dc2626"),
+            background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
         )
+        btn_close.bind(on_release=popup.dismiss)
         title_bar.add_widget(btn_close)
-        root_modal.add_widget(title_bar)
+        modal.add_widget(title_bar)
 
         # Scrollable form container
-        form_scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False, bar_width=0, scroll_type=['content'])
+        form_scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False, bar_width=dp(3), scroll_type=['content'])
         form_box = BoxLayout(orientation='vertical', size_hint_y=None, spacing=dp(8), padding=[dp(2), dp(2), dp(2), dp(6)])
         form_box.bind(minimum_height=form_box.setter('height'))
 
@@ -1565,21 +2798,22 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         cat_scroll_ed.add_widget(cat_box_ed)
         form_box.add_widget(cat_scroll_ed)
 
-        # Pin to Top Toggle & Quick Insert Tools
-        tool_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(6))
+        # Quick Formatting & Insert Toolbar
+        form_box.add_widget(self._create_field_label("Insert Formatting Shortcuts:"))
+        tool_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(6))
         
         btn_pin_tog = Button(
-            text=f"Pin to Top: {'YES' if curr_pin[0] else 'NO'}",
+            text=f"Pin: {'YES' if curr_pin[0] else 'NO'}",
             font_size='11sp',
             bold=True,
-            size_hint_x=0.40,
+            size_hint_x=0.24,
             background_normal='',
             background_color=get_color_from_hex("#f59e0b" if curr_pin[0] else "#334155"),
             color=(1, 1, 1, 1)
         )
         def _toggle_pin_in_modal(b):
             curr_pin[0] = not curr_pin[0]
-            btn_pin_tog.text = f"Pin to Top: {'YES' if curr_pin[0] else 'NO'}"
+            btn_pin_tog.text = f"Pin: {'YES' if curr_pin[0] else 'NO'}"
             btn_pin_tog.background_color = get_color_from_hex("#f59e0b" if curr_pin[0] else "#334155")
         btn_pin_tog.bind(on_release=_toggle_pin_in_modal)
         tool_row.add_widget(btn_pin_tog)
@@ -1588,7 +2822,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="+ [ ] Todo",
             font_size='11sp',
             bold=True,
-            size_hint_x=0.30,
+            size_hint_x=0.25,
             background_normal='',
             background_color=get_color_from_hex("#0f766e"),
             color=(1, 1, 1, 1)
@@ -1599,11 +2833,26 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_ins_chk.bind(on_release=_ins_chk)
         tool_row.add_widget(btn_ins_chk)
 
+        btn_ins_bullet = Button(
+            text="+ Bullet",
+            font_size='11sp',
+            bold=True,
+            size_hint_x=0.25,
+            background_normal='',
+            background_color=get_color_from_hex("#4338ca"),
+            color=(1, 1, 1, 1)
+        )
+        def _ins_bullet(b):
+            prefix = "\n* " if in_content.text and not in_content.text.endswith("\n") else "* "
+            in_content.text += prefix
+        btn_ins_bullet.bind(on_release=_ins_bullet)
+        tool_row.add_widget(btn_ins_bullet)
+
         btn_ins_time = Button(
             text="+ Time",
             font_size='11sp',
             bold=True,
-            size_hint_x=0.30,
+            size_hint_x=0.26,
             background_normal='',
             background_color=get_color_from_hex("#475569"),
             color=(1, 1, 1, 1)
@@ -1650,12 +2899,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         form_box.add_widget(lbl_stats)
 
         form_scroll.add_widget(form_box)
-        root_modal.add_widget(form_scroll)
+        modal.add_widget(form_scroll)
 
         # Bottom Action Bar
         btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(6))
-        popup = Popup(title="", separator_height=0, content=root_modal, size_hint=(0.94, 0.90), auto_dismiss=False)
-        btn_close.bind(on_release=popup.dismiss)
 
         def _do_save_note(x):
             t_val = in_title.text.strip()
@@ -1700,6 +2947,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             popup.dismiss()
             self.refresh_notes_list()
             self.auto_sync_notes_to_gsheet()
+            self.show_popup("Success", f"Note '{t_val}' saved!")
 
         btn_save = Button(
             text="Save Note",
@@ -1744,7 +2992,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_cancel.bind(on_release=popup.dismiss)
         btn_row.add_widget(btn_cancel)
 
-        root_modal.add_widget(btn_row)
+        modal.add_widget(btn_row)
+        popup.content = modal
         popup.open()
 
     def share_note_dialog(self, note):
@@ -1753,20 +3002,51 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         content = note.get("content", "")
         full_text = f"[{tag.upper()}] {title}\n\n{content}".strip()
 
-        content_box = BoxLayout(orientation='vertical', padding=[dp(12), dp(10), dp(12), dp(10)], spacing=dp(8))
-        
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.88, 0.52),
+            auto_dismiss=True
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0b132b",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#334155",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
+
+        # Header
+        hdr = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(8))
         lbl_info = Label(
             text=f"Share '[b]{safe_escape_markup(title)}[/b]'",
             markup=True,
-            font_size='14sp',
+            font_size='15sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_y=None,
-            height=dp(26),
-            halign='center'
+            size_hint_x=0.86,
+            halign='left',
+            valign='middle'
         )
-        content_box.add_widget(lbl_info)
+        lbl_info.bind(size=lbl_info.setter('text_size'))
+        hdr.add_widget(lbl_info)
 
-        popup = Popup(title="Share Note", content=content_box, size_hint=(0.88, 0.54))
+        btn_x = Button(
+            text="X",
+            font_size='13sp',
+            bold=True,
+            size_hint_x=None,
+            width=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_x.bind(on_release=popup.dismiss)
+        hdr.add_widget(btn_x)
+        modal.add_widget(hdr)
 
         # Option 1: LAN Team Chat
         btn_lan = Button(
@@ -1783,7 +3063,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             popup.dismiss()
             self.share_note_to_chat(note)
         btn_lan.bind(on_release=_share_lan)
-        content_box.add_widget(btn_lan)
+        modal.add_widget(btn_lan)
 
         # Option 2: Share to Android Apps (WhatsApp, Email, etc.)
         btn_system = Button(
@@ -1800,11 +3080,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             popup.dismiss()
             self.share_note_to_system(note)
         btn_system.bind(on_release=_share_sys)
-        content_box.add_widget(btn_system)
+        modal.add_widget(btn_system)
 
         # Option 3: Save & Sync to Google Sheet
         btn_gs = Button(
-            text="Save / Sync to Google Sheet ('Notes')",
+            text="Save & Sync to Google Sheet ('Notes')",
             font_size='12sp',
             bold=True,
             size_hint_y=None,
@@ -1829,7 +3109,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 Clock.schedule_once(_res_sgs, 0)
             threading.Thread(target=_thread_sgs, daemon=True).start()
         btn_gs.bind(on_release=_share_gs)
-        content_box.add_widget(btn_gs)
+        modal.add_widget(btn_gs)
 
         # Option 4: Copy
         btn_cp = Button(
@@ -1850,8 +3130,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     pass
             self.show_popup("Copied", "Full note copied to clipboard!")
         btn_cp.bind(on_release=_do_cp)
-        content_box.add_widget(btn_cp)
+        modal.add_widget(btn_cp)
 
+        popup.content = modal
         popup.open()
 
     def share_note_to_system(self, note):
@@ -1878,7 +3159,6 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             except Exception as e:
                 print(f"Android system share error: {e}")
 
-        # Fallback to clipboard
         if Clipboard is not None:
             try:
                 Clipboard.copy(share_body)
@@ -1917,12 +3197,59 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.auto_sync_notes_to_gsheet()
 
     def delete_note_item(self, note_id):
-        content = BoxLayout(orientation='vertical', padding=dp(12), spacing=dp(10))
-        content.add_widget(Label(text="Are you sure you want to delete this note?", font_size='14sp', color=(1, 1, 1, 1), halign='center'))
-        
-        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(40), spacing=dp(8))
-        popup = Popup(title="Confirm Deletion", content=content, size_hint=(0.85, 0.32))
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.88, 0.38),
+            auto_dismiss=True
+        )
 
+        modal = RoundedCard(
+            bg_hex="#0f172a",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#ef4444",
+            orientation='vertical',
+            padding=[dp(16), dp(14), dp(16), dp(14)],
+            spacing=dp(10)
+        )
+
+        lbl_head = Label(
+            text="[b]Confirm Deletion[/b]",
+            markup=True,
+            font_size='16sp',
+            color=get_color_from_hex("#ef4444"),
+            size_hint_y=None,
+            height=dp(28),
+            halign='center',
+            valign='middle'
+        )
+        lbl_head.bind(size=lbl_head.setter('text_size'))
+        modal.add_widget(lbl_head)
+
+        lbl_body = Label(
+            text="Are you sure you want to delete this note?\nThis will remove it from your storage and Google Sheet.",
+            font_size='13sp',
+            color=get_color_from_hex("#cbd5e1"),
+            size_hint=(1, 1),
+            halign='center',
+            valign='middle'
+        )
+        lbl_body.bind(size=lbl_body.setter('text_size'))
+        modal.add_widget(lbl_body)
+
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
+        
+        btn_confirm = Button(
+            text="Delete",
+            font_size='14sp',
+            bold=True,
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#dc2626"),
+            color=(1, 1, 1, 1)
+        )
         def _do_del(x):
             popup.dismiss()
             notes = load_notes() if 'load_notes' in globals() else []
@@ -1931,14 +3258,24 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 save_notes(updated)
             self.refresh_notes_list()
             self.auto_sync_notes_to_gsheet()
+            self.show_popup("Deleted", "Note removed successfully!")
 
-        btn_confirm = Button(text="Delete", background_color=get_color_from_hex("#dc2626"), bold=True)
         btn_confirm.bind(on_release=_do_del)
-        btn_cancel = Button(text="Cancel", background_color=get_color_from_hex("#475569"))
-        btn_cancel.bind(on_release=popup.dismiss)
         btn_row.add_widget(btn_confirm)
+
+        btn_cancel = Button(
+            text="Cancel",
+            font_size='14sp',
+            size_hint_x=0.5,
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_cancel.bind(on_release=popup.dismiss)
         btn_row.add_widget(btn_cancel)
-        content.add_widget(btn_row)
+
+        modal.add_widget(btn_row)
+        popup.content = modal
         popup.open()
 
     def auto_sync_notes_to_gsheet(self):
@@ -1972,16 +3309,32 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         settings = load_settings() if 'load_settings' in globals() else {}
         is_conf = is_google_sheet_configured(settings)
 
-        content = BoxLayout(orientation='vertical', padding=[dp(12), dp(10), dp(12), dp(10)], spacing=dp(8))
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.76),
+            size_hint=(0.92, 0.60),
+            auto_dismiss=False
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0b132b",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#334155",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
 
         # Title Row
-        t_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(6))
+        t_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(6))
         lbl_t = Label(
             text="[b]Google Sheet Cloud Sync (Notes)[/b]",
             markup=True,
-            font_size='14sp',
+            font_size='15sp',
             color=get_color_from_hex("#38bdf8"),
-            size_hint_x=0.88,
+            size_hint_x=0.86,
             halign='left',
             valign='middle'
         )
@@ -1992,39 +3345,37 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text="X",
             font_size='13sp',
             bold=True,
-            size_hint=(None, None),
-            size=(dp(28), dp(28)),
+            size_hint_x=None,
+            width=dp(34),
             background_normal='',
-            background_color=get_color_from_hex("#dc2626"),
+            background_color=get_color_from_hex("#334155"),
             color=(1, 1, 1, 1)
         )
+        btn_c.bind(on_release=popup.dismiss)
         t_row.add_widget(btn_c)
-        content.add_widget(t_row)
+        modal.add_widget(t_row)
 
         # Status Banner
         status_txt = "[color=#10b981]Status: Connected to Google Sheet ('Notes' Tab)[/color]" if is_conf else "[color=#f87171]Status: Google Sheet URL not configured[/color]"
         lbl_st = Label(
             text=status_txt,
             markup=True,
-            font_size='11sp',
+            font_size='12sp',
             size_hint_y=None,
-            height=dp(22),
+            height=dp(24),
             halign='left'
         )
         lbl_st.bind(size=lbl_st.setter('text_size'))
-        content.add_widget(lbl_st)
-
-        popup = Popup(title="", separator_height=0, content=content, size_hint=(0.92, 0.58), auto_dismiss=False)
-        btn_c.bind(on_release=popup.dismiss)
+        modal.add_widget(lbl_st)
 
         # Push Button
         local_n = load_notes() if 'load_notes' in globals() else []
         btn_push = Button(
             text=f"Push Notes to Google Sheet ({len(local_n)} Notes)",
-            font_size='12sp',
+            font_size='13sp',
             bold=True,
             size_hint_y=None,
-            height=dp(38),
+            height=dp(42),
             background_normal='',
             background_color=get_color_from_hex("#10b981"),
             color=(1, 1, 1, 1)
@@ -2049,15 +3400,15 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 Clock.schedule_once(_done, 0)
             threading.Thread(target=_thread_p, daemon=True).start()
         btn_push.bind(on_release=_do_push)
-        content.add_widget(btn_push)
+        modal.add_widget(btn_push)
 
         # Fetch Button
         btn_fetch = Button(
             text="Fetch & Merge Notes from Google Sheet",
-            font_size='12sp',
+            font_size='13sp',
             bold=True,
             size_hint_y=None,
-            height=dp(38),
+            height=dp(42),
             background_normal='',
             background_color=get_color_from_hex("#2563eb"),
             color=(1, 1, 1, 1)
@@ -2097,7 +3448,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 Clock.schedule_once(_done_f, 0)
             threading.Thread(target=_thread_f, daemon=True).start()
         btn_fetch.bind(on_release=_do_fetch)
-        content.add_widget(btn_fetch)
+        modal.add_widget(btn_fetch)
 
         # Auto-Sync on Save Toggle
         auto_val = [settings.get("gsheet_auto_sync", True)]
@@ -2106,7 +3457,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             font_size='12sp',
             bold=True,
             size_hint_y=None,
-            height=dp(36),
+            height=dp(38),
             background_normal='',
             background_color=get_color_from_hex("#059669" if auto_val[0] else "#475569"),
             color=(1, 1, 1, 1)
@@ -2119,7 +3470,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             b.text = f"Auto-Sync on Note Save: {'ON' if auto_val[0] else 'OFF'}"
             b.background_color = get_color_from_hex("#059669" if auto_val[0] else "#475569")
         btn_auto.bind(on_release=_toggle_auto)
-        content.add_widget(btn_auto)
+        modal.add_widget(btn_auto)
 
         # Open Settings Button (if needed)
         if not is_conf:
@@ -2136,8 +3487,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 popup.dismiss()
                 self.open_settings_popup()
             btn_cfg.bind(on_release=_open_cfg)
-            content.add_widget(btn_cfg)
+            modal.add_widget(btn_cfg)
 
+        popup.content = modal
         popup.open()
 
     # =========================================================================
@@ -2297,10 +3649,15 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 self.lbl_chat_status.text = "LAN Chat unavailable"
             return
 
-        user_name = self.settings.get("user_name", "Mobile User")
+        settings = getattr(self, 'settings', None) or (load_settings() if 'load_settings' in globals() else {})
+        user_name = settings.get("user_name", "Developer")
+        device_id = get_or_create_device_id()
+        user_id = get_persistent_user_id(user_name)
         try:
             self.chat_engine = LANChatEngine(
                 user_name=user_name,
+                user_id=user_id,
+                device_id=device_id,
                 on_message=self._on_lan_message_received,
                 on_peers_change=self._on_lan_peers_changed
             )
@@ -2332,12 +3689,24 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
     def _handle_new_incoming_message(self, msg_dict):
         r_id = msg_dict.get("recipient_id", "")
         s_id = msg_dict.get("sender_id", "")
+        r_name = (msg_dict.get("recipient_name") or "").strip().lower()
+        s_name = (msg_dict.get("user_name") or "").strip().lower()
+
         my_id = self.chat_engine.user_id if self.chat_engine else ""
+        my_dev = getattr(self.chat_engine, "device_id", "") if self.chat_engine else ""
+        my_name = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
 
         is_relevant = False
         if self.active_dm_peer:
-            target_id = self.active_dm_peer.get("id")
+            target_id = self.active_dm_peer.get("id", "")
+            target_dev = self.active_dm_peer.get("device_id", "")
+            target_name = (self.active_dm_peer.get("user_name") or "").strip().lower()
+
             if (r_id == target_id and s_id == my_id) or (r_id == my_id and s_id == target_id):
+                is_relevant = True
+            elif target_dev and ((r_id.endswith(target_dev) and s_id == my_id) or (s_id.endswith(target_dev) and r_id == my_id)):
+                is_relevant = True
+            elif target_name and ((s_name == target_name and (r_name == my_name or not r_name)) or (s_name == my_name and r_name == target_name)):
                 is_relevant = True
         else:
             if not r_id:
@@ -2429,14 +3798,22 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             b_all.bind(on_release=lambda x: self.switch_to_dm(None))
             self.team_strip_layout.add_widget(b_all)
 
+            # Online peers
+            rendered_contact_names = set()
             for peer in self.chat_engine.peers.values():
                 p_name = peer.get("user_name", "Peer")
-                p_ip = peer.get("ip", "")
-                is_active = bool(self.active_dm_peer and self.active_dm_peer.get("id") == peer.get("id"))
+                p_id = peer.get("id")
+                p_dev = peer.get("device_id", p_id)
+                rendered_contact_names.add(p_name.strip().lower())
+                is_active = bool(self.active_dm_peer and (
+                    self.active_dm_peer.get("id") == p_id or
+                    (p_dev and self.active_dm_peer.get("device_id") == p_dev) or
+                    self.active_dm_peer.get("user_name", "").lower() == p_name.lower()
+                ))
                 b_peer = Button(
-                    text=f"{p_name}",
+                    text=f"[b]{p_name}[/b]",
+                    markup=True,
                     font_size='11sp',
-                    bold=True,
                     size_hint=(None, None),
                     size=(dp(max(90, len(p_name)*8 + 36)), dp(32)),
                     background_normal='',
@@ -2445,6 +3822,45 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 )
                 b_peer.bind(on_release=lambda x, p=peer: self.switch_to_dm(p))
                 self.team_strip_layout.add_widget(b_peer)
+
+            # Known contacts from previous chat history who might be offline
+            my_n = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
+            known_contacts = {}
+            for m in reversed(self.chat_engine.messages):
+                rn = (m.get("recipient_name") or "").strip()
+                rid = m.get("recipient_id") or ""
+                sn = (m.get("user_name") or "").strip()
+                sid = m.get("sender_id") or ""
+                sdev = m.get("device_id", sid)
+                
+                if rid and rn and sn:
+                    if sn.lower() == my_n and rn.lower() != my_n:
+                        if rn.lower() not in known_contacts:
+                            known_contacts[rn.lower()] = {"id": rid, "device_id": sdev, "user_name": rn, "ip": m.get("file_ip", "")}
+                    elif rn.lower() == my_n and sn.lower() != my_n:
+                        if sn.lower() not in known_contacts:
+                            known_contacts[sn.lower()] = {"id": sid, "device_id": sdev, "user_name": sn, "ip": m.get("file_ip", "")}
+
+            for kn_lower, kn_peer in known_contacts.items():
+                if kn_lower in rendered_contact_names:
+                    continue
+                kn_name = kn_peer.get("user_name", "Peer")
+                is_active = bool(self.active_dm_peer and (
+                    self.active_dm_peer.get("id") == kn_peer.get("id") or
+                    self.active_dm_peer.get("user_name", "").lower() == kn_name.lower()
+                ))
+                b_kn = Button(
+                    text=f"{kn_name} (Off)",
+                    font_size='11sp',
+                    bold=True,
+                    size_hint=(None, None),
+                    size=(dp(max(100, len(kn_name)*8 + 48)), dp(32)),
+                    background_normal='',
+                    background_color=get_color_from_hex("#059669" if is_active else "#334155"),
+                    color=get_color_from_hex("#ffffff" if is_active else "#94a3b8")
+                )
+                b_kn.bind(on_release=lambda x, p=kn_peer: self.switch_to_dm(p))
+                self.team_strip_layout.add_widget(b_kn)
 
             # Quick Action Chips in ribbon
             b_tasks = Button(
@@ -2720,12 +4136,29 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         filtered_msgs = []
         if self.active_dm_peer:
-            peer_id = self.active_dm_peer.get("id")
-            my_id = self.chat_engine.user_id
+            peer_id = self.active_dm_peer.get("id", "")
+            peer_dev = self.active_dm_peer.get("device_id", "")
+            peer_name = (self.active_dm_peer.get("user_name") or "").strip().lower()
+            my_id = self.chat_engine.user_id if self.chat_engine else ""
+            my_dev = getattr(self.chat_engine, "device_id", "") if self.chat_engine else ""
+            my_name = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
+
             for msg in self.chat_engine.messages:
                 r_id = msg.get("recipient_id", "")
                 s_id = msg.get("sender_id", "")
-                if (r_id == peer_id and s_id == my_id) or (r_id == my_id and s_id == peer_id):
+                r_name = (msg.get("recipient_name") or "").strip().lower()
+                s_name = (msg.get("user_name") or "").strip().lower()
+                is_me_msg = bool(msg.get("is_me") or (my_id and s_id == my_id) or (my_name and s_name == my_name))
+
+                # Check if this message belongs to this DM
+                if (r_id and (r_id == peer_id or (peer_dev and r_id.endswith(peer_dev)))) and (s_id == my_id or is_me_msg):
+                    filtered_msgs.append(msg)
+                elif (s_id and (s_id == peer_id or (peer_dev and s_id.endswith(peer_dev)))) and (r_id == my_id or not r_id or r_name == my_name):
+                    filtered_msgs.append(msg)
+                elif r_name and peer_name and (
+                    (is_me_msg and r_name == peer_name) or
+                    ((not is_me_msg) and s_name == peer_name and (r_name == my_name or not r_name))
+                ):
                     filtered_msgs.append(msg)
         else:
             for msg in self.chat_engine.messages:
@@ -2764,7 +4197,17 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 return
             self.rendered_msg_ids.add(msg_id)
 
-        is_me = msg.get("is_me", False) or (self.chat_engine and msg.get("sender_id") == self.chat_engine.user_id)
+        my_id = self.chat_engine.user_id if self.chat_engine else ""
+        my_name = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
+        msg_sender = (msg.get("user_name") or "").strip().lower()
+        msg_sid = msg.get("sender_id", "")
+
+        is_me = bool(
+            msg.get("is_me", False) or
+            (my_id and msg_sid == my_id) or
+            (my_name and msg_sender == my_name and not msg.get("recipient_id")) or
+            (my_name and msg_sender == my_name and msg.get("recipient_id") and msg.get("recipient_name", "").strip().lower() != my_name)
+        )
         msg_type = msg.get("type", "text")
         sender = safe_escape_markup(msg.get("user_name", "Anonymous"))
         time_s = safe_escape_markup(msg.get("time_str", ""))

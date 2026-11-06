@@ -11,8 +11,8 @@
     "weekend_mode": "Custom",
     "second_fourth_saturday": false,
     "weekly_offs": [
-        "Sunday",
-        "Saturday"
+        "Saturday",
+        "Sunday"
     ],
     "holidays": [
         {
@@ -262,7 +262,7 @@
     "data_api_sync_on_delete": true,
     "lan_chat_enabled": true,
     "lan_chat_port": 45454,
-    "gsheet_webapp_url": "https://script.google.com/macros/s/AKfycbzMVKAgy5fI12Cr3Lx8o3Rnq7wsfP9oUTioocvwh16Ak6Udef_GMPCnzTt22jPe2Sb3/exec",
+    "gsheet_webapp_url": "https://script.google.https://script.google.com/macros/s/AKfycbwKHWPMVRyvG64nFH741uSeQiifr7mNXVq8XYMWzoXmcVsDCFUMIllerDflDnJpPk0/exec",
     "gsheet_auto_sync": true,
     "gsheet_fetch_priority": true,
     "gsheet_last_sync": "2026-11-06 00:46:05",

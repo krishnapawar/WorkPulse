@@ -87,6 +87,67 @@ def get_storage_path(filename):
     return target_path
 
 
+def get_or_create_device_id():
+    """
+    Returns a persistent, unique device identifier for this installation.
+    1. Reads saved device_id from persistent storage file (device_id.txt) or settings.
+    2. On Android: attempts to query hardware Settings.Secure.ANDROID_ID via pyjnius.
+    3. Desktop / Fallback: generates a stable UUID and saves it permanently to disk.
+    Guaranteed to remain constant across app restarts, reboots, and updates.
+    """
+    dev_file = get_storage_path("device_id.txt")
+    if os.path.exists(dev_file):
+        try:
+            with open(dev_file, "r", encoding="utf-8") as f:
+                saved = f.read().strip()
+                if saved and len(saved) >= 6:
+                    return saved
+        except Exception:
+            pass
+
+    if is_android():
+        try:
+            from jnius import autoclass
+            PythonActivity = autoclass('org.kivy.android.PythonActivity')
+            SettingsSecure = autoclass('android.provider.Settings$Secure')
+            activity = getattr(PythonActivity, 'mActivity', None)
+            if activity:
+                cr = activity.getContentResolver()
+                aid = SettingsSecure.getString(cr, SettingsSecure.ANDROID_ID)
+                if aid and len(str(aid).strip()) >= 6:
+                    dev_id = f"dev_{str(aid).strip()[:12]}"
+                    try:
+                        with open(dev_file, "w", encoding="utf-8") as f:
+                            f.write(dev_id)
+                    except Exception:
+                        pass
+                    return dev_id
+        except Exception as e:
+            print(f"Notice: Android ANDROID_ID query: {e}")
+
+    import uuid
+    dev_id = f"dev_{uuid.uuid4().hex[:12]}"
+    try:
+        with open(dev_file, "w", encoding="utf-8") as f:
+            f.write(dev_id)
+    except Exception as e:
+        print(f"Notice: could not save device_id: {e}")
+
+    return dev_id
+
+
+def get_persistent_user_id(user_name="Developer"):
+    """
+    Returns a permanent LAN user ID combining the user's name and unique device ID.
+    Format: '<clean_name>_<device_id>' (e.g. 'developer_dev_a1b2c3d4e5f6').
+    Remains strictly identical across app restarts so chats and peer IDs never reset.
+    """
+    import re
+    device_id = get_or_create_device_id()
+    clean_name = re.sub(r'[^a-zA-Z0-9]', '', (user_name or "user").lower())[:10] or "user"
+    return f"{clean_name}_{device_id}"
+
+
 # ==============================================================================
 # Android Hardware & OS Integrations (Multicast Lock & System Notifications)
 # ==============================================================================
