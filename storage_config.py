@@ -171,6 +171,10 @@ def get_storage_path(filename):
         storage_dir = get_storage_dir()
         target_path = os.path.join(storage_dir, filename)
 
+        # Never copy device identity files from bundled application assets
+        if filename in ("device_id.txt", ".device_id"):
+            return target_path
+
         if not os.path.exists(target_path):
             bundled_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
             if os.path.exists(bundled_path) and os.path.abspath(bundled_path) != os.path.abspath(target_path):
@@ -185,25 +189,41 @@ def get_storage_path(filename):
         return os.path.join(os.path.dirname(os.path.abspath(__file__)), filename)
 
 
+# Known placeholder / colliding IDs from previous releases that must be refreshed
+_INVALID_DEVICE_IDS = {
+    "dev_94343317f21e",
+    "dev_local_fallback",
+    "dev_default",
+    "dev_emulator",
+    "dev_android_9774d56d682e549c"
+}
+
+
 def get_or_create_device_id():
     """
-    Returns a persistent, unique device identifier for this installation.
-    1. Reads saved device_id from persistent storage file (device_id.txt) or settings.
-    2. On Android: attempts to query hardware Settings.Secure.ANDROID_ID via pyjnius.
-    3. Desktop / Fallback: generates a stable UUID and saves it permanently to disk.
-    Guaranteed to remain constant across app restarts, reboots, and updates.
+    Returns a persistent, hardware-unique device identifier for this installation.
+    1. Reads saved device_id from persistent storage file (device_id.txt).
+       If invalid or matching an old bundled placeholder, automatically regenerates.
+    2. On Android: attempts to query hardware Settings.Secure.ANDROID_ID via pyjnius
+       and prefixes with 'dev_android_'.
+    3. Desktop (Linux/Windows/macOS): queries machine-id or MAC address
+       and prefixes with 'dev_pc_'.
+    Guaranteed unique per device and strictly persistent across restarts.
     """
     dev_file = get_storage_path("device_id.txt")
     if os.path.exists(dev_file):
         try:
             with open(dev_file, "r", encoding="utf-8") as f:
                 saved = f.read().strip()
-                if saved and len(saved) >= 6:
+                if saved and len(saved) >= 8 and saved not in _INVALID_DEVICE_IDS:
                     return saved
         except Exception:
             pass
 
+    import uuid
+
     if is_android():
+        aid_str = None
         try:
             from jnius import autoclass
             PythonActivity = autoclass('org.kivy.android.PythonActivity')
@@ -212,19 +232,49 @@ def get_or_create_device_id():
             if activity:
                 cr = activity.getContentResolver()
                 aid = SettingsSecure.getString(cr, SettingsSecure.ANDROID_ID)
-                if aid and len(str(aid).strip()) >= 6:
-                    dev_id = f"dev_{str(aid).strip()[:12]}"
-                    try:
-                        with open(dev_file, "w", encoding="utf-8") as f:
-                            f.write(dev_id)
-                    except Exception:
-                        pass
-                    return dev_id
+                if aid:
+                    s_aid = str(aid).strip()
+                    if len(s_aid) >= 6 and s_aid != "9774d56d682e549c":
+                        aid_str = s_aid[:10]
         except Exception as e:
             print(f"Notice: Android ANDROID_ID query: {e}")
 
-    import uuid
-    dev_id = f"dev_{uuid.uuid4().hex[:12]}"
+        if not aid_str:
+            aid_str = uuid.uuid4().hex[:10]
+
+        dev_id = f"dev_android_{aid_str}"
+        try:
+            with open(dev_file, "w", encoding="utf-8") as f:
+                f.write(dev_id)
+        except Exception as e:
+            print(f"Notice: could not save device_id: {e}")
+        return dev_id
+
+    # Desktop (Linux / macOS / Windows)
+    mach_id = None
+    for p in ("/etc/machine-id", "/var/lib/dbus/machine-id"):
+        if os.path.exists(p):
+            try:
+                with open(p, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    if content and len(content) >= 8:
+                        mach_id = content[:10]
+                        break
+            except Exception:
+                pass
+
+    if not mach_id:
+        try:
+            node = uuid.getnode()
+            if node and node != 0:
+                mach_id = f"{node:012x}"[:10]
+        except Exception:
+            pass
+
+    if not mach_id:
+        mach_id = uuid.uuid4().hex[:10]
+
+    dev_id = f"dev_pc_{mach_id}"
     try:
         with open(dev_file, "w", encoding="utf-8") as f:
             f.write(dev_id)
@@ -265,9 +315,10 @@ def acquire_android_multicast_lock():
         from jnius import autoclass
         PythonActivity = autoclass('org.kivy.android.PythonActivity')
         Context = autoclass('android.content.Context')
-        activity = PythonActivity.mActivity
+        activity = getattr(PythonActivity, 'mActivity', None)
         if activity:
-            wifi_service = activity.getSystemService(Context.WIFI_SERVICE)
+            ctx = activity.getApplicationContext() if hasattr(activity, 'getApplicationContext') else activity
+            wifi_service = ctx.getSystemService(Context.WIFI_SERVICE)
             if wifi_service:
                 _MULTICAST_LOCK = wifi_service.createMulticastLock("workpulse_multicast_lock")
                 _MULTICAST_LOCK.setReferenceCounted(True)
@@ -333,6 +384,15 @@ def get_android_network_info():
                             broadcasts.add(bcast_ip)
 
         primary_ip = local_ips[0] if local_ips else None
+
+        # Subnet broadcast fallback if ia.getBroadcast() returned null on this router
+        if primary_ip:
+            parts = primary_ip.split(".")
+            if len(parts) == 4 and parts[0] != "127":
+                broadcasts.add(f"{parts[0]}.{parts[1]}.{parts[2]}.255")
+                broadcasts.add(f"{parts[0]}.{parts[1]}.255.255")
+        broadcasts.add("255.255.255.255")
+
         return primary_ip, list(broadcasts)
     except Exception as e:
         print(f"Notice: Android network interface detection: {e}")

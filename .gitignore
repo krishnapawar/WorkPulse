@@ -52,3 +52,4 @@ chat_history.db-shm
 *.db
 scratch/
 gkey.txt
+device_id.txt

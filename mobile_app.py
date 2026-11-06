@@ -3802,6 +3802,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.team_strip_layout.add_widget(b_all)
 
             # Online peers
+            my_n = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
             rendered_contact_names = set()
             for peer in self.chat_engine.peers.values():
                 p_name = peer.get("user_name", "Peer")
@@ -3810,15 +3811,19 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 rendered_contact_names.add(p_name.strip().lower())
                 is_active = bool(self.active_dm_peer and (
                     self.active_dm_peer.get("id") == p_id or
-                    (p_dev and self.active_dm_peer.get("device_id") == p_dev) or
-                    self.active_dm_peer.get("user_name", "").lower() == p_name.lower()
+                    (p_dev and self.active_dm_peer.get("device_id") == p_dev)
                 ))
+                if p_name.strip().lower() == my_n:
+                    display_pname = f"{p_name} (PC)" if "pc" in str(p_dev).lower() else f"{p_name} (Remote)"
+                else:
+                    display_pname = p_name
+
                 b_peer = Button(
-                    text=f"[b]{p_name}[/b]",
+                    text=f"[b]{display_pname}[/b]",
                     markup=True,
                     font_size='11sp',
                     size_hint=(None, None),
-                    size=(dp(max(90, len(p_name)*8 + 36)), dp(32)),
+                    size=(dp(max(96, len(display_pname)*8 + 36)), dp(32)),
                     background_normal='',
                     background_color=get_color_from_hex("#059669" if is_active else "#1e293b"),
                     color=get_color_from_hex("#ffffff" if is_active else "#34d399")
@@ -3827,7 +3832,6 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 self.team_strip_layout.add_widget(b_peer)
 
             # Known contacts from previous chat history who might be offline
-            my_n = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
             known_contacts = {}
             for m in reversed(self.chat_engine.messages):
                 rn = (m.get("recipient_name") or "").strip()
@@ -3995,6 +3999,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 p_ip = peer.get("ip", "")
                 p_host = peer.get("hostname", "Device")
                 p_color = peer.get("avatar_color", "#059669")
+                p_dev = str(peer.get("device_id", "")).lower()
+                if p_name.strip().lower() == my_name.strip().lower():
+                    card_display_name = f"{p_name} (PC)" if "pc" in p_dev else f"{p_name} (Remote)"
+                else:
+                    card_display_name = p_name
                 initials = get_initials(p_name) if 'get_initials' in globals() else p_name[:2].upper()
 
                 card = BoxLayout(orientation='vertical', size_hint_y=None, height=dp(84), padding=[dp(8), dp(6), dp(8), dp(6)], spacing=dp(6))
@@ -4018,7 +4027,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
                 p_info = BoxLayout(orientation='vertical', size_hint_x=1, spacing=dp(1))
                 lbl_pn = Label(
-                    text=f"[b]{safe_escape_markup(p_name)}[/b]",
+                    text=f"[b]{safe_escape_markup(card_display_name)}[/b]",
                     markup=True,
                     font_size='13sp',
                     color=get_color_from_hex("#f8fafc"),
@@ -4151,7 +4160,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 s_id = msg.get("sender_id", "")
                 r_name = (msg.get("recipient_name") or "").strip().lower()
                 s_name = (msg.get("user_name") or "").strip().lower()
-                is_me_msg = bool(msg.get("is_me") or (my_id and s_id == my_id) or (my_name and s_name == my_name))
+                msg_dev = msg.get("device_id", "")
+
+                if msg.get("is_me") is not None:
+                    is_me_msg = bool(msg.get("is_me"))
+                elif my_id and s_id:
+                    is_me_msg = (s_id == my_id)
+                elif my_dev and msg_dev:
+                    is_me_msg = (msg_dev == my_dev)
+                else:
+                    is_me_msg = bool(my_name and s_name == my_name)
 
                 # Check if this message belongs to this DM
                 if (r_id and (r_id == peer_id or (peer_dev and r_id.endswith(peer_dev)))) and (s_id == my_id or is_me_msg):
@@ -4201,16 +4219,20 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.rendered_msg_ids.add(msg_id)
 
         my_id = self.chat_engine.user_id if self.chat_engine else ""
+        my_dev = getattr(self.chat_engine, "device_id", "") if self.chat_engine else ""
         my_name = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
         msg_sender = (msg.get("user_name") or "").strip().lower()
         msg_sid = msg.get("sender_id", "")
+        msg_dev = msg.get("device_id", "")
 
-        is_me = bool(
-            msg.get("is_me", False) or
-            (my_id and msg_sid == my_id) or
-            (my_name and msg_sender == my_name and not msg.get("recipient_id")) or
-            (my_name and msg_sender == my_name and msg.get("recipient_id") and msg.get("recipient_name", "").strip().lower() != my_name)
-        )
+        if msg.get("is_me") is not None:
+            is_me = bool(msg.get("is_me"))
+        elif my_id and msg_sid:
+            is_me = (msg_sid == my_id)
+        elif my_dev and msg_dev:
+            is_me = (msg_dev == my_dev)
+        else:
+            is_me = bool(my_name and msg_sender == my_name)
         msg_type = msg.get("type", "text")
         sender = safe_escape_markup(msg.get("user_name", "Anonymous"))
         time_s = safe_escape_markup(msg.get("time_str", ""))
@@ -5322,7 +5344,10 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         def _do_connect(x):
             ip_val = in_ip.text.strip()
             if ip_val and self.chat_engine:
-                self.chat_engine.add_custom_ip(ip_val)
+                if hasattr(self.chat_engine, "add_custom_peer_ip"):
+                    self.chat_engine.add_custom_peer_ip(ip_val)
+                elif hasattr(self.chat_engine, "add_custom_ip"):
+                    self.chat_engine.add_custom_ip(ip_val)
                 popup.dismiss()
                 self._update_network_status_labels()
                 self.show_popup("Connected", f"Target IP {ip_val} added to broadcast list!")

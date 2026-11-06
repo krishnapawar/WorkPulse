@@ -1786,6 +1786,7 @@ class LANChatEngine:
                 "id": uuid.uuid4().hex[:12],
                 "type": "leave",
                 "sender_id": self.user_id,
+                "device_id": self.device_id,
                 "user_name": self.user_name
             }
             self._send_raw_packet(leave_pkt)
@@ -1862,6 +1863,10 @@ class LANChatEngine:
             pass
         return True
 
+    def add_custom_ip(self, ip_str):
+        """Mobile compatibility alias for add_custom_peer_ip."""
+        return self.add_custom_peer_ip(ip_str)
+
     def send_chat_message(self, text, reply_to=None, recipient_id="", recipient_name=""):
         """Sends a team chat message or 1-on-1 private direct message."""
         clean_text = text.strip()
@@ -1877,6 +1882,7 @@ class LANChatEngine:
             "id": pkt_id,
             "type": "chat",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "avatar_color": self.avatar_color,
             "text": clean_text,
@@ -1934,6 +1940,7 @@ class LANChatEngine:
             "type": "file",
             "is_image": is_image,
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "avatar_color": self.avatar_color,
             "file_id": file_id,
@@ -1997,6 +2004,7 @@ class LANChatEngine:
             "type": "pin_announcement",
             "action": "pin",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "pin_obj": pin_obj
         }
@@ -2026,6 +2034,7 @@ class LANChatEngine:
             "type": "pin_announcement",
             "action": "unpin",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name
         }
         self._send_raw_packet(pkt)
@@ -2045,6 +2054,7 @@ class LANChatEngine:
             "id": poll_id,
             "type": "poll",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "avatar_color": self.avatar_color,
             "text": question,
@@ -2069,6 +2079,7 @@ class LANChatEngine:
             "id": poll_id,
             "type": "poll",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "avatar_color": self.avatar_color,
             "question": question,
@@ -2129,7 +2140,9 @@ class LANChatEngine:
             "type": "poll_vote",
             "poll_id": poll_id,
             "option_id": option_id,
+            "sender_id": self.user_id,
             "user_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": user,
             "timestamp": time.time(),
         }
@@ -2171,6 +2184,7 @@ class LANChatEngine:
                 "id": uuid.uuid4().hex[:12],
                 "type": "reaction",
                 "sender_id": self.user_id,
+                "device_id": self.device_id,
                 "user_name": self.user_name,
                 "msg_id": msg_id,
                 "emoji": emoji,
@@ -2314,6 +2328,7 @@ class LANChatEngine:
             "id": pkt_id,
             "type": "work_update",
             "sender_id": self.user_id,
+            "device_id": self.device_id,
             "user_name": self.user_name,
             "avatar_color": self.avatar_color,
             "title": title or "Today's Work Summary",
@@ -2354,6 +2369,7 @@ class LANChatEngine:
                 "id": uuid.uuid4().hex[:12],
                 "type": "delete_message",
                 "sender_id": self.user_id,
+                "device_id": self.device_id,
                 "target_msg_id": msg_id,
                 "timestamp": time.time()
             }
@@ -2476,9 +2492,16 @@ class LANChatEngine:
         sender_id = pkt.get("sender_id")
         pkt_id = pkt.get("id")
         pkt_type = pkt.get("type")
+        pkt_dev_id = pkt.get("device_id")
 
-        if sender_id == self.user_id:
+        # 1. Reject packets originated from this exact physical device
+        if pkt_dev_id and hasattr(self, 'device_id') and self.device_id and pkt_dev_id == self.device_id:
             return
+
+        # 2. Reject packets where sender_id matches this instance AND device_id also matches or is missing
+        if sender_id == self.user_id:
+            if not pkt_dev_id or (hasattr(self, 'device_id') and pkt_dev_id == self.device_id):
+                return
 
         with self.lock:
             if self._record_seen_packet(pkt_id):
@@ -2845,6 +2868,10 @@ class LANChatEngine:
             with self.lock:
                 if sender_id in self.peers:
                     del self.peers[sender_id]
+                if pkt_dev_id:
+                    stale_ids = [pid for pid, p in self.peers.items() if p.get("device_id") == pkt_dev_id]
+                    for sid in stale_ids:
+                        del self.peers[sid]
             if self.on_peers_change:
                 self.on_peers_change(self.get_online_peers())
 
@@ -5170,9 +5197,14 @@ class LANChatDialog:
             name_row = tk.Frame(info, bg=card_bg)
             name_row.pack(fill=tk.X)
 
+            peer_display = p["user_name"]
+            p_dev = str(p.get("device_id", "")).lower()
+            if peer_display.strip().lower() == self.engine.user_name.strip().lower():
+                peer_display = f"{peer_display} (Mobile)" if "android" in p_dev else f"{peer_display} (Device)"
+
             name_lbl = tk.Label(
                 name_row,
-                text=p["user_name"],
+                text=peer_display,
                 font=font_spec(12, "bold"),
                 fg="#ffffff",
                 bg=card_bg,
