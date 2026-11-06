@@ -3324,6 +3324,9 @@ class LANChatDialog:
         # Top Pinned Announcement Banner (Under Room Bar)
         self.pin_banner = tk.Frame(chat_box, bg="#1e293b", bd=1, relief="solid", padx=12, pady=6)
 
+        # Incoming DM Alert Banner (Shown when a private message arrives in team room)
+        self.incoming_dm_banner = tk.Frame(chat_box, bg="#1e3a8a", bd=1, relief="solid", padx=12, pady=8)
+
         # Quick Find (Ctrl+F) In-Chat Search Bar
         self.find_bar = tk.Frame(chat_box, bg="#1e293b", bd=1, relief="solid", padx=10, pady=5)
         # (Packed dynamically above self.msg_canvas_box when active)
@@ -4900,8 +4903,15 @@ class LANChatDialog:
     def _select_dm_peer(self, peer_dict):
         """Switches conversation context to 1-on-1 private direct message with peer."""
         self.active_dm_peer = peer_dict
-        peer_id = peer_dict["id"]
+        peer_id = peer_dict.get("id", "")
         self.unread_dms.pop(peer_id, None)
+        if peer_dict.get("device_id"):
+            self.unread_dms.pop(peer_dict["device_id"], None)
+        if peer_dict.get("user_name"):
+            self.unread_dms.pop(peer_dict["user_name"], None)
+
+        if hasattr(self, "incoming_dm_banner"):
+            self.incoming_dm_banner.pack_forget()
 
         self.lbl_room_title.config(text=f"🔒 {peer_dict['user_name']}")
         host_str = f" • {peer_dict.get('hostname', 'Device')} ({peer_dict.get('ip', '')})" if peer_dict.get('ip') else ""
@@ -4917,6 +4927,9 @@ class LANChatDialog:
     def _select_team_room(self):
         """Switches conversation context back to the public team general room."""
         self.active_dm_peer = None
+        if hasattr(self, "incoming_dm_banner"):
+            self.incoming_dm_banner.pack_forget()
+
         self.lbl_room_title.config(text="# team-general")
         self.lbl_room_sub.config(text="• Local Wi-Fi broadcast • Real-time across devices")
         self.btn_back_to_room.pack_forget()
@@ -4929,19 +4942,53 @@ class LANChatDialog:
 
     def _message_matches_current_view(self, msg):
         """Returns True if message belongs to current channel (Public room vs active DM peer)."""
-        recipient_id = msg.get("recipient_id", "") or ""
+        recipient_id = (msg.get("recipient_id") or "").strip()
+        recipient_name = (msg.get("recipient_name") or "").strip().lower()
+
         if self.active_dm_peer is None:
             # Public team room: only messages without recipient_id
             return not recipient_id
+
+        # 1-on-1 DM channel: Match bidirectional communication with active_dm_peer
+        target_peer_id = (self.active_dm_peer.get("id") or "").strip()
+        target_dev = (self.active_dm_peer.get("device_id") or "").strip()
+        target_name = (self.active_dm_peer.get("user_name") or "").strip().lower()
+
+        sender_id = (msg.get("sender_id") or "").strip()
+        sender_dev = (msg.get("device_id") or "").strip()
+        sender_name = (msg.get("user_name") or "").strip().lower()
+
+        my_id = (self.engine.user_id or "").strip()
+        my_dev = (getattr(self.engine, "device_id", "") or "").strip()
+        my_name = (self.engine.user_name or "").strip().lower()
+
+        # Determine if message was sent by me
+        if msg.get("is_me") is not None and msg.get("is_me") != 0 and msg.get("is_me") != "0":
+            is_me = bool(msg.get("is_me"))
+        elif my_id and sender_id == my_id:
+            is_me = True
+        elif my_dev and (sender_dev == my_dev or sender_id.endswith(my_dev)):
+            is_me = True
+        elif my_name and sender_name == my_name:
+            is_me = True
         else:
-            target_peer_id = self.active_dm_peer["id"]
-            is_me = msg.get("is_me", False)
-            sender_id = msg.get("sender_id", "")
-            if is_me and recipient_id == target_peer_id:
-                return True
-            if (not is_me) and sender_id == target_peer_id and recipient_id == self.engine.user_id:
-                return True
-            return False
+            is_me = False
+
+        if is_me:
+            # Sent by me -> recipient must match target peer
+            return bool(
+                (target_peer_id and recipient_id == target_peer_id) or
+                (target_dev and (recipient_id.endswith(target_dev) or recipient_name == target_name)) or
+                (target_name and (recipient_name == target_name or target_name in recipient_id.lower()))
+            )
+        else:
+            # Sent by peer -> sender must match target peer, and message must be a direct message
+            peer_matches = bool(
+                (target_peer_id and sender_id == target_peer_id) or
+                (target_dev and (sender_id.endswith(target_dev) or sender_dev == target_dev)) or
+                (target_name and (sender_name == target_name or target_name in sender_id.lower()))
+            )
+            return peer_matches and bool(recipient_id)
 
     def _refresh_chat_feed(self):
         """Clears and re-renders messages belonging to currently active channel."""
@@ -5051,6 +5098,90 @@ class LANChatDialog:
             return
         self.dialog.after(0, lambda: self._render_pinned_banner(pin_obj))
 
+    def _show_incoming_dm_alert(self, msg_obj):
+        """Shows an eye-catching notification banner when a DM arrives while viewing public room."""
+        if not hasattr(self, "incoming_dm_banner") or not hasattr(self, "dialog") or not self.dialog.winfo_exists():
+            return
+        for w in self.incoming_dm_banner.winfo_children():
+            w.destroy()
+
+        sender_name = msg_obj.get("user_name", "Colleague")
+        sender_id = msg_obj.get("sender_id", "")
+        sender_dev = msg_obj.get("device_id", "")
+        preview_txt = (msg_obj.get("text") or msg_obj.get("file_name") or msg_obj.get("title") or "New message")
+        if len(preview_txt) > 65:
+            preview_txt = preview_txt[:62] + "..."
+
+        lbl_icon = tk.Label(self.incoming_dm_banner, text="🔒", font=font_spec(12), fg="#38bdf8", bg="#1e3a8a")
+        lbl_icon.pack(side=tk.LEFT, padx=(0, 6))
+
+        txt_frame = tk.Frame(self.incoming_dm_banner, bg="#1e3a8a")
+        txt_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+        tk.Label(
+            txt_frame,
+            text=f"Direct Message from {sender_name}:",
+            font=font_spec(11, "bold"),
+            fg="#ffffff",
+            bg="#1e3a8a"
+        ).pack(anchor="w")
+
+        tk.Label(
+            txt_frame,
+            text=f'"{preview_txt}"',
+            font=font_spec(10, slant="italic"),
+            fg="#bfdbfe",
+            bg="#1e3a8a"
+        ).pack(anchor="w")
+
+        peer_match = None
+        for p in self.engine.get_online_peers():
+            if p.get("id") == sender_id or (sender_dev and p.get("device_id") == sender_dev) or p.get("user_name", "").lower() == sender_name.lower():
+                peer_match = p
+                break
+        if not peer_match:
+            peer_match = {
+                "id": sender_id,
+                "device_id": sender_dev,
+                "user_name": sender_name,
+                "hostname": "Device",
+                "ip": msg_obj.get("file_ip", "")
+            }
+
+        btn_open = tk.Button(
+            self.incoming_dm_banner,
+            text="💬 Open DM",
+            font=font_spec(10, "bold"),
+            bg="#2563eb",
+            fg="#ffffff",
+            activebackground="#1d4ed8",
+            activeforeground="#ffffff",
+            relief="flat",
+            padx=10,
+            pady=3,
+            cursor="hand2",
+            command=lambda: (self.incoming_dm_banner.pack_forget(), self._select_dm_peer(peer_match))
+        )
+        btn_open.pack(side=tk.RIGHT, padx=4)
+
+        btn_dismiss = tk.Button(
+            self.incoming_dm_banner,
+            text="✕",
+            font=font_spec(10, "bold"),
+            bg="#1e3a8a",
+            fg="#94a3b8",
+            activebackground="#334155",
+            activeforeground="#f87171",
+            relief="flat",
+            padx=6,
+            pady=2,
+            cursor="hand2",
+            command=self.incoming_dm_banner.pack_forget
+        )
+        btn_dismiss.pack(side=tk.RIGHT, padx=2)
+
+        self.incoming_dm_banner.pack(fill=tk.X, padx=8, pady=(4, 2), before=self.msg_canvas_box)
+
     # ---------- Thread-Safe Engine Callback Handlers ----------
 
     def _on_engine_message(self, msg_obj):
@@ -5060,6 +5191,8 @@ class LANChatDialog:
 
         def _ui_update():
             sender_id = msg_obj.get("sender_id", "")
+            sender_dev = msg_obj.get("device_id", "")
+            sender_name = msg_obj.get("user_name", "Colleague")
             is_dm = bool(msg_obj.get("recipient_id"))
             matches_view = self._message_matches_current_view(msg_obj)
 
@@ -5068,7 +5201,12 @@ class LANChatDialog:
             elif is_dm and sender_id:
                 # Direct message from a colleague who is not currently active
                 self.unread_dms[sender_id] = self.unread_dms.get(sender_id, 0) + 1
+                if sender_dev:
+                    self.unread_dms[sender_dev] = self.unread_dms.get(sender_dev, 0) + 1
+                self.unread_dms[sender_name.strip().lower()] = self.unread_dms.get(sender_name.strip().lower(), 0) + 1
                 self._refresh_peers_ui(self.engine.get_online_peers())
+                if not msg_obj.get("is_me", False):
+                    self._show_incoming_dm_alert(msg_obj)
 
             # Trigger notification sound and in-app toast if from peer
             if not msg_obj.get("is_me", False):
@@ -5109,11 +5247,27 @@ class LANChatDialog:
                 # Update dialog title to indicate unread message until focused
                 self.dialog.title(f"{icon} (New Message) WorkPulse - LAN Team Chat")
 
+                peer_match = None
+                for p in self.engine.get_online_peers():
+                    if p.get("id") == sender_id or (sender_dev and p.get("device_id") == sender_dev) or p.get("user_name", "").lower() == sender.lower():
+                        peer_match = p
+                        break
+                if not peer_match:
+                    peer_match = {
+                        "id": sender_id,
+                        "device_id": sender_dev,
+                        "user_name": sender,
+                        "hostname": "Device",
+                        "ip": msg_obj.get("file_ip", "")
+                    }
+                on_click_handler = (lambda p=peer_match: self._select_dm_peer(p)) if is_dm else None
+
                 show_in_app_toast(
                     self.dialog,
                     f"{icon} {sender}",
                     preview,
                     icon=icon,
+                    on_click=on_click_handler,
                     duration_ms=4500
                 )
 
@@ -5128,14 +5282,14 @@ class LANChatDialog:
     # ---------- Rendering Helpers ----------
 
     def _refresh_peers_ui(self, peers):
-        """Rebuilds the online colleague cards in the left sidebar."""
+        """Rebuilds online colleague cards and recent contact cards in the left sidebar."""
         if not hasattr(self, "peers_inner") or not hasattr(self, "dialog") or not self.dialog.winfo_exists():
             return
         for widget in self.peers_inner.winfo_children():
             widget.destroy()
 
-        count = len(peers)
-        self.lbl_peer_count.config(text=f"TEAM ON WI-FI ({count})")
+        online_count = len(peers)
+        self.lbl_peer_count.config(text=f"TEAM ON WI-FI ({online_count})")
 
         # Update public room card style
         if self.active_dm_peer is None:
@@ -5145,7 +5299,223 @@ class LANChatDialog:
             self.card_public_room.config(bg="#1e293b")
             self.lbl_public_name.config(bg="#1e293b", fg="#94a3b8")
 
-        if not peers:
+        rendered_ids = set()
+        rendered_devs = set()
+        rendered_names = set()
+
+        def _render_peer_card(p, is_offline=False):
+            p_id = p.get("id", "")
+            p_name = p.get("user_name", "Colleague")
+            p_dev = str(p.get("device_id", "")).lower()
+
+            is_active_dm = bool(
+                self.active_dm_peer and (
+                    self.active_dm_peer.get("id") == p_id or
+                    (p_dev and self.active_dm_peer.get("device_id") == p_dev) or
+                    (self.active_dm_peer.get("user_name", "").strip().lower() == p_name.strip().lower())
+                )
+            )
+            card_bg = "#1e3a8a" if is_active_dm else ("#26334d" if is_offline else "#334155")
+
+            p_card = tk.Frame(self.peers_inner, bg=card_bg, padx=10, pady=10, bd=1, relief="solid", cursor="hand2")
+            p_card.pack(fill=tk.X, padx=4, pady=3)
+
+            top = tk.Frame(p_card, bg=card_bg)
+            top.pack(fill=tk.X)
+
+            avatar = tk.Label(
+                top,
+                text=get_initials(p_name),
+                font=font_spec(11, "bold"),
+                fg="#ffffff",
+                bg=p.get("avatar_color", AVATAR_PALETTE[0]),
+                width=3,
+                height=1,
+                relief="flat",
+                cursor="hand2"
+            )
+            avatar.pack(side=tk.LEFT, padx=(0, 8))
+
+            info = tk.Frame(top, bg=card_bg)
+            info.pack(side=tk.LEFT, fill=tk.X, expand=True)
+
+            name_row = tk.Frame(info, bg=card_bg)
+            name_row.pack(fill=tk.X)
+
+            peer_display = p_name
+            if peer_display.strip().lower() == self.engine.user_name.strip().lower():
+                peer_display = f"{peer_display} (Mobile)" if "android" in p_dev else f"{peer_display} (Device)"
+
+            name_lbl = tk.Label(
+                name_row,
+                text=peer_display,
+                font=font_spec(12, "bold"),
+                fg="#ffffff",
+                bg=card_bg,
+                cursor="hand2"
+            )
+            name_lbl.pack(side=tk.LEFT)
+
+            unread_cnt = self.unread_dms.get(p_id, 0)
+            if not unread_cnt and p_dev:
+                unread_cnt = self.unread_dms.get(p_dev, 0)
+            if not unread_cnt:
+                unread_cnt = self.unread_dms.get(p_name.strip().lower(), 0)
+
+            if unread_cnt > 0:
+                badge = tk.Label(
+                    name_row,
+                    text=f" {unread_cnt} new ",
+                    font=font_spec(9, "bold"),
+                    fg="#ffffff",
+                    bg="#ef4444",
+                    padx=4,
+                    pady=1
+                )
+                badge.pack(side=tk.RIGHT, padx=2)
+
+            if is_offline:
+                status_str = "⚪ Offline • Click to Chat"
+                status_fg = "#94a3b8"
+            else:
+                status_str = f"{p.get('status_emoji', '🟢')} {p.get('status', 'Available')}"
+                status_fg = "#38bdf8"
+
+            status_lbl = tk.Label(
+                info,
+                text=status_str,
+                font=font_spec(11),
+                fg=status_fg,
+                bg=card_bg,
+                cursor="hand2"
+            )
+            status_lbl.pack(anchor="w")
+
+            if p.get("status_note"):
+                note_lbl = tk.Label(
+                    info,
+                    text=f'💬 "{p["status_note"]}"',
+                    font=font_spec(10, slant="italic"),
+                    fg="#cbd5e1",
+                    bg=card_bg,
+                    cursor="hand2",
+                    wraplength=180,
+                    justify="left"
+                )
+                note_lbl.pack(anchor="w")
+                note_lbl.bind("<Button-1>", lambda e, pr=p: self._select_dm_peer(pr))
+
+            sub_desc = f"{p.get('hostname', 'Recent Contact')} • Click to DM 💬"
+            ip_lbl = tk.Label(
+                p_card,
+                text=sub_desc,
+                font=font_spec(10),
+                fg="#94a3b8",
+                bg=card_bg,
+                cursor="hand2"
+            )
+            ip_lbl.pack(anchor="w", pady=(4, 0))
+
+            def _bind_dm_click(w, peer_obj=p):
+                w.bind("<Button-1>", lambda e: self._select_dm_peer(peer_obj))
+
+            _bind_dm_click(p_card)
+            _bind_dm_click(top)
+            _bind_dm_click(avatar)
+            _bind_dm_click(info)
+            _bind_dm_click(name_row)
+            _bind_dm_click(name_lbl)
+            _bind_dm_click(status_lbl)
+            _bind_dm_click(ip_lbl)
+
+        # 1. Render currently active online peers
+        for p in peers:
+            _render_peer_card(p, is_offline=False)
+            if p.get("id"):
+                rendered_ids.add(p["id"])
+            if p.get("device_id"):
+                rendered_devs.add(p["device_id"])
+            if p.get("user_name"):
+                rendered_names.add(p["user_name"].strip().lower())
+
+        # 2. Extract known contacts from past messages (offline peers)
+        my_id = (self.engine.user_id or "").strip()
+        my_dev = (getattr(self.engine, "device_id", "") or "").strip()
+        my_name = (self.engine.user_name or "").strip().lower()
+
+        known_contacts = {}
+        for m in reversed(getattr(self.engine, "messages", [])):
+            rn = (m.get("recipient_name") or "").strip()
+            rid = (m.get("recipient_id") or "").strip()
+            sn = (m.get("user_name") or "").strip()
+            sid = (m.get("sender_id") or "").strip()
+            sdev = (m.get("device_id") or "").strip()
+
+            if not rid:
+                continue
+
+            is_msg_from_me = bool(
+                m.get("is_me") or
+                (my_id and sid == my_id) or
+                (my_dev and (sdev == my_dev or sid.endswith(my_dev))) or
+                (my_name and sn.lower() == my_name)
+            )
+
+            if is_msg_from_me:
+                c_name = rn or rid
+                c_id = rid
+                c_dev = ""
+                c_ip = ""
+            else:
+                c_name = sn or sid
+                c_id = sid
+                c_dev = sdev
+                c_ip = m.get("file_ip", "")
+
+            if not c_dev and "dev_" in c_id:
+                c_dev = c_id[c_id.find("dev_"):]
+
+            c_name_clean = c_name.strip()
+            if not c_name_clean or c_name_clean.lower() == my_name:
+                continue
+
+            c_key = c_name_clean.lower()
+            if c_id in rendered_ids or c_key in rendered_names or (c_dev and c_dev in rendered_devs):
+                continue
+
+            if c_key not in known_contacts:
+                known_contacts[c_key] = {
+                    "id": c_id,
+                    "device_id": c_dev,
+                    "user_name": c_name_clean,
+                    "hostname": "Recent Contact",
+                    "ip": c_ip,
+                    "status": "Offline",
+                    "status_emoji": "⚪",
+                    "status_note": "",
+                    "avatar_color": get_avatar_color(c_name_clean),
+                    "is_offline": True
+                }
+
+        # 3. Render offline contacts if any
+        if known_contacts:
+            if peers:
+                tk.Label(
+                    self.peers_inner,
+                    text="RECENT CONTACTS",
+                    font=font_spec(9, "bold"),
+                    fg="#64748b",
+                    bg="#0f172a",
+                    anchor="w",
+                    padx=6,
+                    pady=6
+                ).pack(fill=tk.X, pady=(6, 2))
+
+            for kn_peer in known_contacts.values():
+                _render_peer_card(kn_peer, is_offline=True)
+
+        # 4. If neither online peers nor known contacts exist, display placeholder
+        if not peers and not known_contacts:
             placeholder = tk.Frame(self.peers_inner, bg="#1e293b", padx=12, pady=18)
             placeholder.pack(fill=tk.X)
 
@@ -5166,111 +5536,6 @@ class LANChatDialog:
                 justify="left",
                 wraplength=260
             ).pack(anchor="w", pady=(6, 0))
-            return
-
-        for p in peers:
-            is_active_dm = bool(self.active_dm_peer and self.active_dm_peer["id"] == p["id"])
-            card_bg = "#1e3a8a" if is_active_dm else "#334155"
-
-            p_card = tk.Frame(self.peers_inner, bg=card_bg, padx=10, pady=10, bd=1, relief="solid", cursor="hand2")
-            p_card.pack(fill=tk.X, padx=4, pady=3)
-
-            top = tk.Frame(p_card, bg=card_bg)
-            top.pack(fill=tk.X)
-
-            avatar = tk.Label(
-                top,
-                text=get_initials(p["user_name"]),
-                font=font_spec(11, "bold"),
-                fg="#ffffff",
-                bg=p.get("avatar_color", AVATAR_PALETTE[0]),
-                width=3,
-                height=1,
-                relief="flat",
-                cursor="hand2"
-            )
-            avatar.pack(side=tk.LEFT, padx=(0, 8))
-
-            info = tk.Frame(top, bg=card_bg)
-            info.pack(side=tk.LEFT, fill=tk.X, expand=True)
-
-            name_row = tk.Frame(info, bg=card_bg)
-            name_row.pack(fill=tk.X)
-
-            peer_display = p["user_name"]
-            p_dev = str(p.get("device_id", "")).lower()
-            if peer_display.strip().lower() == self.engine.user_name.strip().lower():
-                peer_display = f"{peer_display} (Mobile)" if "android" in p_dev else f"{peer_display} (Device)"
-
-            name_lbl = tk.Label(
-                name_row,
-                text=peer_display,
-                font=font_spec(12, "bold"),
-                fg="#ffffff",
-                bg=card_bg,
-                cursor="hand2"
-            )
-            name_lbl.pack(side=tk.LEFT)
-
-            unread_cnt = self.unread_dms.get(p["id"], 0)
-            if unread_cnt > 0:
-                badge = tk.Label(
-                    name_row,
-                    text=f" {unread_cnt} new ",
-                    font=font_spec(9, "bold"),
-                    fg="#ffffff",
-                    bg="#ef4444",
-                    padx=4,
-                    pady=1
-                )
-                badge.pack(side=tk.RIGHT, padx=2)
-
-            status_str = f"{p.get('status_emoji', '🟢')} {p.get('status', 'Available')}"
-            status_lbl = tk.Label(
-                info,
-                text=status_str,
-                font=font_spec(11),
-                fg="#38bdf8",
-                bg=card_bg,
-                cursor="hand2"
-            )
-            status_lbl.pack(anchor="w")
-
-            if p.get("status_note"):
-                note_lbl = tk.Label(
-                    info,
-                    text=f'💬 "{p["status_note"]}"',
-                    font=font_spec(10, slant="italic"),
-                    fg="#cbd5e1",
-                    bg=card_bg,
-                    cursor="hand2",
-                    wraplength=180,
-                    justify="left"
-                )
-                note_lbl.pack(anchor="w")
-                note_lbl.bind("<Button-1>", lambda e, pr=p: self._select_dm_peer(pr))
-
-            ip_lbl = tk.Label(
-                p_card,
-                text=f"{p.get('hostname', 'Device')} • Click to DM 💬",
-                font=font_spec(10),
-                fg="#94a3b8",
-                bg=card_bg,
-                cursor="hand2"
-            )
-            ip_lbl.pack(anchor="w", pady=(4, 0))
-
-            def _bind_dm_click(w, peer_obj=p):
-                w.bind("<Button-1>", lambda e: self._select_dm_peer(peer_obj))
-
-            _bind_dm_click(p_card)
-            _bind_dm_click(top)
-            _bind_dm_click(avatar)
-            _bind_dm_click(info)
-            _bind_dm_click(name_row)
-            _bind_dm_click(name_lbl)
-            _bind_dm_click(status_lbl)
-            _bind_dm_click(ip_lbl)
 
     def _render_message_content(self, parent, text, bg_color, is_me=False):
         """
@@ -5365,8 +5630,24 @@ class LANChatDialog:
             return
 
         m_type = msg.get("type", "chat")
-        is_me = msg.get("is_me", False)
         sender = msg.get("user_name", "Colleague")
+        sender_id = (msg.get("sender_id") or "").strip()
+        sender_dev = (msg.get("device_id") or "").strip()
+        my_id = (self.engine.user_id or "").strip()
+        my_dev = (getattr(self.engine, "device_id", "") or "").strip()
+        my_name = (self.engine.user_name or "").strip().lower()
+
+        if msg.get("is_me") is not None and msg.get("is_me") != 0 and msg.get("is_me") != "0":
+            is_me = bool(msg.get("is_me"))
+        elif my_id and sender_id == my_id:
+            is_me = True
+        elif my_dev and (sender_dev == my_dev or sender_id.endswith(my_dev)):
+            is_me = True
+        elif my_name and sender.strip().lower() == my_name:
+            is_me = True
+        else:
+            is_me = False
+
         time_str = msg.get("time_str", "")
         avatar_bg = msg.get("avatar_color", AVATAR_PALETTE[0])
         msg_id = msg.get("id") or uuid.uuid4().hex[:12]
@@ -6413,6 +6694,7 @@ class LANChatDialog:
 
         if scroll:
             self.dialog.update_idletasks()
+            self.msg_canvas.configure(scrollregion=self.msg_canvas.bbox("all"))
             self.msg_canvas.yview_moveto(1.0)
 
 
