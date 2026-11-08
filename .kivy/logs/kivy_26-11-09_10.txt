@@ -31,3 +31,5 @@
 [DEBUG  ] Starting new HTTPS connection (1): script.google.https:443
 [WARNING] MTD: Unable to open device "/dev/input/event7". Please ensure you have the appropriate permissions.
 [WARNING] MTD: Unable to open device "/dev/input/event8". Please ensure you have the appropriate permissions.
+[WARNING] Deprecated property "<BooleanProperty name=allow_stretch>" of object "<kivy.uix.image.Image object at 0x7fe399c4a120>" has been set, it will be removed in a future version
+[WARNING] Deprecated property "<BooleanProperty name=keep_ratio>" of object "<kivy.uix.image.Image object at 0x7fe399c4a120>" was accessed, it will be removed in a future version
