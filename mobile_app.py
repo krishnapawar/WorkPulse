@@ -101,6 +101,55 @@ class RoundedCard(BoxLayout if KIVY_AVAILABLE else object):
         if hasattr(self, '_c_color'):
             self._c_color.rgba = get_color_from_hex(hex_code)
 
+class SwipeContainer(BoxLayout if KIVY_AVAILABLE else object):
+    """
+    Container that detects smooth horizontal swipe gestures to switch tabs
+    while safely ignoring touches on horizontal sub-scroll ribbons.
+    """
+    def __init__(self, app_ref=None, **kwargs):
+        if KIVY_AVAILABLE:
+            super().__init__(**kwargs)
+        self.app = app_ref
+        self._touch_start_x = None
+        self._touch_start_y = None
+
+    def on_touch_down(self, touch):
+        if hasattr(self, 'collide_point') and self.collide_point(*touch.pos):
+            self._touch_start_x = touch.x
+            self._touch_start_y = touch.y
+        return super().on_touch_down(touch) if KIVY_AVAILABLE else False
+
+    def on_touch_up(self, touch):
+        res = super().on_touch_up(touch) if KIVY_AVAILABLE else False
+        if self._touch_start_x is not None and self._touch_start_y is not None:
+            dx = touch.x - self._touch_start_x
+            dy = touch.y - self._touch_start_y
+            self._touch_start_x = None
+            self._touch_start_y = None
+
+            if self.app:
+                # Ignore swipe if touch occurred on horizontal sub-scroll ribbons
+                if hasattr(self.app, 'team_strip_scroll') and self.app.team_strip_scroll and self.app.team_strip_scroll.collide_point(*touch.pos):
+                    return res
+                if hasattr(self.app, 'tpl_scroll') and self.app.tpl_scroll and self.app.tpl_scroll.collide_point(*touch.pos):
+                    return res
+                if hasattr(self.app, 'cat_scroll') and self.app.cat_scroll and self.app.cat_scroll.collide_point(*touch.pos):
+                    return res
+
+                from kivy.metrics import dp
+                if abs(dx) > dp(100) and abs(dy) < dp(45):
+                    tabs = getattr(self.app, 'tabs_order', ["work", "updates", "notes", "chat", "remind"])
+                    cur = getattr(self.app, 'current_tab', 'work')
+                    if cur in tabs:
+                        idx = tabs.index(cur)
+                        if dx < 0 and idx < len(tabs) - 1:
+                            self.app.switch_tab(tabs[idx + 1])
+                            return True
+                        elif dx > 0 and idx > 0:
+                            self.app.switch_tab(tabs[idx - 1])
+                            return True
+        return res
+
 def safe_escape_markup(text):
     """Escapes Kivy markup tags to prevent markup parsing errors with user text."""
     if not isinstance(text, str):
@@ -126,6 +175,24 @@ except Exception:
         return f"{c}_dev_local_fallback"
 
 NOTES_FILE = get_storage_path("notes.json")
+SHIFT_TIMER_FILE = get_storage_path("shift_timer.json")
+
+def load_shift_timer():
+    if os.path.exists(SHIFT_TIMER_FILE):
+        try:
+            with open(SHIFT_TIMER_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {}
+
+def save_shift_timer(data):
+    try:
+        with open(SHIFT_TIMER_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+        return True
+    except Exception:
+        return False
 
 def load_notes():
     if os.path.exists(NOTES_FILE):
@@ -246,10 +313,11 @@ except Exception as e:
 try:
     from lan_chat import (
         LANChatEngine, get_network_info, get_avatar_color, get_initials, format_file_size,
-        get_file_icon, is_image_file
+        get_file_icon, is_image_file, export_chat_history
     )
 except Exception as e:
     print(f"Warning: lan_chat import: {e}")
+    export_chat_history = None
     LANChatEngine = None
     get_network_info = None
     get_avatar_color = None
@@ -421,8 +489,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         root.add_widget(nav_tabs)
 
-        # 3. Dynamic Screen Content Area
-        self.content_container = BoxLayout(orientation='vertical', size_hint=(1, 1))
+        # 3. Dynamic Screen Content Area with Swipe Navigation support
+        self.tabs_order = ["work", "updates", "notes", "chat", "remind"]
+        self.content_container = SwipeContainer(app_ref=self, orientation='vertical', size_hint=(1, 1))
         root.add_widget(self.content_container)
 
         # Build individual tab views
@@ -612,6 +681,34 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         t_row.add_widget(self.in_login)
         t_row.add_widget(self.in_logout)
         card_shift.add_widget(t_row)
+
+        # 1-Tap Live Shift Timer / Punch Clock Widget
+        punch_box = RoundedCard(bg_hex="#0b1120", radius=[dp(8), dp(8), dp(8), dp(8)], orientation='horizontal', size_hint_y=None, height=dp(40), padding=[dp(6), dp(3), dp(6), dp(3)], spacing=dp(8))
+        self.btn_shift_punch = Button(
+            text="Start Shift",
+            font_size='12sp',
+            bold=True,
+            size_hint_x=0.42,
+            background_normal='',
+            background_color=get_color_from_hex("#059669"),
+            color=(1, 1, 1, 1)
+        )
+        self.btn_shift_punch.bind(on_release=self.toggle_shift_timer)
+        punch_box.add_widget(self.btn_shift_punch)
+
+        self.lbl_shift_timer_status = Label(
+            text="Timer: Inactive",
+            font_size='11sp',
+            color=get_color_from_hex("#94a3b8"),
+            size_hint_x=0.58,
+            halign='center',
+            valign='middle'
+        )
+        self.lbl_shift_timer_status.bind(size=self.lbl_shift_timer_status.setter('text_size'))
+        punch_box.add_widget(self.lbl_shift_timer_status)
+        card_shift.add_widget(punch_box)
+        Clock.schedule_once(lambda dt: self._restore_shift_timer_state(), 0.2)
+
         form.add_widget(card_shift)
 
         # Card 3: Work Description & Notes
@@ -803,6 +900,52 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         root.add_widget(kpi_row)
 
+        # Weekly Target Progress & Streak Card
+        self.card_weekly_goal = RoundedCard(
+            bg_hex="#0f172a",
+            radius=[dp(10), dp(10), dp(10), dp(10)],
+            border_hex="#334155",
+            orientation='vertical',
+            size_hint_y=None,
+            height=dp(46),
+            padding=[dp(10), dp(5), dp(10), dp(5)],
+            spacing=dp(3)
+        )
+        goal_top = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(18))
+        self.lbl_goal_text = Label(
+            text="[b]Weekly Target[/b]: 0.0h / 40h (0%)",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_x=0.68,
+            halign='left',
+            valign='middle'
+        )
+        self.lbl_goal_text.bind(size=self.lbl_goal_text.setter('text_size'))
+        goal_top.add_widget(self.lbl_goal_text)
+
+        self.lbl_streak_badge = Label(
+            text="Streak: 1 Day",
+            font_size='10sp',
+            bold=True,
+            color=get_color_from_hex("#f59e0b"),
+            size_hint_x=0.32,
+            halign='right',
+            valign='middle'
+        )
+        self.lbl_streak_badge.bind(size=self.lbl_streak_badge.setter('text_size'))
+        goal_top.add_widget(self.lbl_streak_badge)
+        self.card_weekly_goal.add_widget(goal_top)
+
+        # Visual progress track & fill bar
+        self.bar_goal_track = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(8))
+        self.bar_goal_fill = RoundedCard(bg_hex="#10b981", radius=[dp(4), dp(4), dp(4), dp(4)], size_hint_x=0.01)
+        self.bar_goal_empty = Widget(size_hint_x=0.99)
+        self.bar_goal_track.add_widget(self.bar_goal_fill)
+        self.bar_goal_track.add_widget(self.bar_goal_empty)
+        self.card_weekly_goal.add_widget(self.bar_goal_track)
+        root.add_widget(self.card_weekly_goal)
+
         # 3. Horizontal Scrollable Filter Chips
         self.current_hist_filter = "All"
         self.hist_filter_buttons = {}
@@ -948,6 +1091,55 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self.lbl_kpi_hours_val.text = f"{tot_hours:.1f}h"
         if hasattr(self, 'lbl_kpi_status_val') and self.lbl_kpi_status_val:
             self.lbl_kpi_status_val.text = f"{comp_cnt} Done"
+
+        # Weekly target & streak calculations
+        today_d = datetime.date.today()
+        week_start = today_d - datetime.timedelta(days=today_d.weekday())
+        week_end = week_start + datetime.timedelta(days=6)
+
+        week_hours = 0.0
+        worked_dates = set()
+
+        for r in records:
+            r_d_str = str(r[1] or "").strip()
+            h_val = 0.0
+            try:
+                h_val = float(str(r[5] or "0").replace("h", "").strip())
+            except Exception:
+                pass
+            try:
+                r_date = datetime.datetime.strptime(r_d_str, "%Y-%m-%d").date()
+                if week_start <= r_date <= week_end:
+                    week_hours += h_val
+                if h_val > 0:
+                    worked_dates.add(r_date)
+            except Exception:
+                pass
+
+        streak = 0
+        chk_d = today_d
+        if chk_d not in worked_dates:
+            chk_d = today_d - datetime.timedelta(days=1)
+        while chk_d in worked_dates:
+            streak += 1
+            chk_d = chk_d - datetime.timedelta(days=1)
+        streak = max(1, streak) if (today_d in worked_dates or (today_d - datetime.timedelta(days=1)) in worked_dates) else 0
+
+        target_weekly = 40.0
+        pct = min(100, int((week_hours / target_weekly) * 100))
+
+        if hasattr(self, 'lbl_goal_text') and self.lbl_goal_text:
+            self.lbl_goal_text.text = f"[b]Weekly Target[/b]: {week_hours:.1f}h / {target_weekly:.0f}h ({pct}%)"
+        if hasattr(self, 'lbl_streak_badge') and self.lbl_streak_badge:
+            streak_txt = f"Streak: {streak}d" if streak > 0 else "Start Streak"
+            self.lbl_streak_badge.text = streak_txt
+
+        if hasattr(self, 'bar_goal_fill') and hasattr(self, 'bar_goal_empty') and self.bar_goal_fill:
+            fill_ratio = max(0.01, min(1.0, week_hours / target_weekly))
+            self.bar_goal_fill.size_hint_x = fill_ratio
+            self.bar_goal_empty.size_hint_x = max(0.001, 1.0 - fill_ratio)
+            color_hex = "#f59e0b" if pct >= 100 else ("#10b981" if pct >= 50 else "#3b82f6")
+            self.bar_goal_fill.set_bg_color(color_hex)
 
         # Dynamically build filter chips ribbon
         categories = [
@@ -1950,7 +2142,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         root.add_widget(kpi_row)
 
         # 3. Quick 1-Tap Template Action Ribbon
-        tpl_scroll = ScrollView(size_hint_y=None, height=dp(30), do_scroll_x=True, do_scroll_y=False, bar_width=0)
+        self.tpl_scroll = ScrollView(size_hint_y=None, height=dp(30), do_scroll_x=True, do_scroll_y=False, bar_width=0)
+        tpl_scroll = self.tpl_scroll
         tpl_box = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(30), spacing=dp(6), padding=[dp(2), 0, dp(2), 0])
         tpl_box.bind(minimum_width=tpl_box.setter('width'))
 
@@ -1982,7 +2175,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         # 4. Category Filter Bar with Live Counts
         self.current_note_filter = "All"
-        cat_scroll = ScrollView(size_hint_y=None, height=dp(32), do_scroll_x=True, do_scroll_y=False, bar_width=0)
+        self.cat_scroll = ScrollView(size_hint_y=None, height=dp(32), do_scroll_x=True, do_scroll_y=False, bar_width=0)
+        cat_scroll = self.cat_scroll
         self.cat_box = BoxLayout(orientation='horizontal', size_hint_x=None, height=dp(32), spacing=dp(6), padding=[dp(2), 0, dp(2), 0])
         self.cat_box.bind(minimum_width=self.cat_box.setter('width'))
         self.note_categories = ["All", "Work", "Meeting", "Ideas", "Todo", "Urgent", "Personal"]
@@ -2803,13 +2997,13 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         # Quick Formatting & Insert Toolbar
         form_box.add_widget(self._create_field_label("Insert Formatting Shortcuts:"))
-        tool_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(6))
+        tool_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(32), spacing=dp(5))
         
         btn_pin_tog = Button(
             text=f"Pin: {'YES' if curr_pin[0] else 'NO'}",
-            font_size='11sp',
+            font_size='10.5sp',
             bold=True,
-            size_hint_x=0.24,
+            size_hint_x=0.2,
             background_normal='',
             background_color=get_color_from_hex("#f59e0b" if curr_pin[0] else "#334155"),
             color=(1, 1, 1, 1)
@@ -2823,9 +3017,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         btn_ins_chk = Button(
             text="+ [ ] Todo",
-            font_size='11sp',
+            font_size='10.5sp',
             bold=True,
-            size_hint_x=0.25,
+            size_hint_x=0.2,
             background_normal='',
             background_color=get_color_from_hex("#0f766e"),
             color=(1, 1, 1, 1)
@@ -2838,9 +3032,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         btn_ins_bullet = Button(
             text="+ Bullet",
-            font_size='11sp',
+            font_size='10.5sp',
             bold=True,
-            size_hint_x=0.25,
+            size_hint_x=0.2,
             background_normal='',
             background_color=get_color_from_hex("#4338ca"),
             color=(1, 1, 1, 1)
@@ -2851,11 +3045,26 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_ins_bullet.bind(on_release=_ins_bullet)
         tool_row.add_widget(btn_ins_bullet)
 
+        btn_ins_date = Button(
+            text="+ Date",
+            font_size='10.5sp',
+            bold=True,
+            size_hint_x=0.2,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        def _ins_date(b):
+            d_now = datetime.datetime.now().strftime("[%b %d, %Y] ")
+            in_content.text += ("\n" + d_now if in_content.text and not in_content.text.endswith("\n") else d_now)
+        btn_ins_date.bind(on_release=_ins_date)
+        tool_row.add_widget(btn_ins_date)
+
         btn_ins_time = Button(
             text="+ Time",
-            font_size='11sp',
+            font_size='10.5sp',
             bold=True,
-            size_hint_x=0.26,
+            size_hint_x=0.2,
             background_normal='',
             background_color=get_color_from_hex("#475569"),
             color=(1, 1, 1, 1)
@@ -3590,7 +3799,70 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.btn_team_ctrl.bind(on_release=self.open_online_team_popup)
         self.chat_top_bar.add_widget(self.btn_team_ctrl)
 
+        # Quick action: In-Chat Search toggle button
+        self.btn_chat_search_toggle = Button(
+            text="Find",
+            font_size='11sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(46), dp(34)),
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        self.btn_chat_search_toggle.bind(on_release=lambda x: self.toggle_chat_search_bar())
+        self.chat_top_bar.add_widget(self.btn_chat_search_toggle)
+
         container.add_widget(self.chat_top_bar)
+
+        # Collapsible In-Chat Search Bar
+        self.chat_search_query = ""
+        self.chat_search_bar = BoxLayout(
+            orientation='horizontal',
+            size_hint_y=None,
+            height=dp(0),
+            opacity=0,
+            disabled=True,
+            padding=[dp(8), dp(2), dp(8), dp(2)],
+            spacing=dp(6)
+        )
+        self.in_chat_search = TextInput(
+            hint_text="Search messages, files, notes...",
+            multiline=False,
+            font_size='12sp',
+            size_hint_x=0.72,
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            hint_text_color=get_color_from_hex("#64748b"),
+            padding=[dp(8), dp(8)]
+        )
+        self.in_chat_search.bind(text=self._on_chat_search_text_changed)
+        self.chat_search_bar.add_widget(self.in_chat_search)
+
+        self.lbl_chat_search_count = Label(
+            text="",
+            font_size='10sp',
+            color=get_color_from_hex("#94a3b8"),
+            size_hint_x=0.18,
+            halign='center',
+            valign='middle'
+        )
+        self.chat_search_bar.add_widget(self.lbl_chat_search_count)
+
+        btn_close_chat_search = Button(
+            text="X",
+            font_size='12sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(28), dp(28)),
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close_chat_search.bind(on_release=lambda x: self.toggle_chat_search_bar(False))
+        self.chat_search_bar.add_widget(btn_close_chat_search)
+        container.add_widget(self.chat_search_bar)
 
         # 2. Horizontal Colleague & Quick-Action Ribbon
         self.team_strip_scroll = ScrollView(size_hint_y=None, height=dp(38), do_scroll_x=True, do_scroll_y=False)
@@ -3599,12 +3871,174 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         self.team_strip_scroll.add_widget(self.team_strip_layout)
         container.add_widget(self.team_strip_scroll)
 
+        # Top Pinned Announcement Banner
+        self.chat_pin_banner = RoundedCard(
+            bg_hex="#1e293b",
+            radius=[dp(6), dp(6), dp(6), dp(6)],
+            border_hex="#38bdf8",
+            orientation='horizontal',
+            size_hint_y=None,
+            height=dp(0),
+            opacity=0,
+            disabled=True,
+            padding=[dp(8), dp(4), dp(8), dp(4)],
+            spacing=dp(6)
+        )
+        self.lbl_pin_text = Label(
+            text="",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex("#f8fafc"),
+            size_hint_x=0.82,
+            halign='left',
+            valign='middle',
+            shorten=True,
+            shorten_from='right'
+        )
+        self.lbl_pin_text.bind(size=self.lbl_pin_text.setter('text_size'))
+        self.chat_pin_banner.add_widget(self.lbl_pin_text)
+
+        btn_unpin_banner = Button(
+            text="Unpin",
+            font_size='11sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(54), dp(26)),
+            background_normal='',
+            background_color=get_color_from_hex("#ef4444"),
+            color=(1, 1, 1, 1)
+        )
+        def _unpin_click(x):
+            if self.chat_engine:
+                self.chat_engine.unpin_announcement()
+        btn_unpin_banner.bind(on_release=_unpin_click)
+        self.chat_pin_banner.add_widget(btn_unpin_banner)
+        container.add_widget(self.chat_pin_banner)
+
+        # Incoming Direct Message Alert Banner (Shown when a private message arrives)
+        self.chat_incoming_dm_banner = RoundedCard(
+            bg_hex="#1e3a8a",
+            radius=[dp(6), dp(6), dp(6), dp(6)],
+            border_hex="#60a5fa",
+            orientation='horizontal',
+            size_hint_y=None,
+            height=dp(0),
+            opacity=0,
+            disabled=True,
+            padding=[dp(8), dp(3), dp(8), dp(3)],
+            spacing=dp(6)
+        )
+        self.lbl_dm_banner_text = Label(
+            text="",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex("#ffffff"),
+            size_hint_x=0.68,
+            halign='left',
+            valign='middle',
+            shorten=True,
+            shorten_from='right'
+        )
+        self.lbl_dm_banner_text.bind(size=self.lbl_dm_banner_text.setter('text_size'))
+        self.chat_incoming_dm_banner.add_widget(self.lbl_dm_banner_text)
+
+        self.btn_open_incoming_dm = Button(
+            text="Open DM",
+            font_size='10sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(68), dp(26)),
+            background_normal='',
+            background_color=get_color_from_hex("#2563eb"),
+            color=(1, 1, 1, 1)
+        )
+        self.chat_incoming_dm_banner.add_widget(self.btn_open_incoming_dm)
+
+        btn_dismiss_dm = Button(
+            text="Dismiss",
+            font_size='10sp',
+            size_hint=(None, None),
+            size=(dp(54), dp(26)),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            color=get_color_from_hex("#94a3b8")
+        )
+        btn_dismiss_dm.bind(on_release=lambda x: self._hide_incoming_dm_banner())
+        self.chat_incoming_dm_banner.add_widget(btn_dismiss_dm)
+        container.add_widget(self.chat_incoming_dm_banner)
+
         # 3. Chat Message Stream ScrollView
         self.chat_scroll = ScrollView(size_hint=(1, 1), do_scroll_x=False)
         self.chat_list_layout = GridLayout(cols=1, spacing=dp(10), padding=[dp(8), dp(8), dp(8), dp(8)], size_hint_y=None)
         self.chat_list_layout.bind(minimum_height=self.chat_list_layout.setter('height'))
         self.chat_scroll.add_widget(self.chat_list_layout)
         container.add_widget(self.chat_scroll)
+
+        # Quoted Reply Ribbon (Hidden by default, shown when replying)
+        self.active_reply = None
+        self.reply_bar = BoxLayout(
+            orientation='horizontal',
+            size_hint_y=None,
+            height=dp(0),
+            opacity=0,
+            disabled=True,
+            padding=[dp(8), dp(2), dp(8), dp(2)],
+            spacing=dp(6)
+        )
+        self.lbl_reply_preview = Label(
+            text="",
+            markup=True,
+            font_size='11sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_x=0.85,
+            halign='left',
+            valign='middle',
+            shorten=True,
+            shorten_from='right'
+        )
+        self.lbl_reply_preview.bind(size=self.lbl_reply_preview.setter('text_size'))
+        self.reply_bar.add_widget(self.lbl_reply_preview)
+
+        btn_cancel_rep = Button(
+            text="Cancel",
+            font_size='10sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(50), dp(24)),
+            background_normal='',
+            background_color=get_color_from_hex("#ef4444"),
+            color=(1, 1, 1, 1)
+        )
+        btn_cancel_rep.bind(on_release=lambda x: self.clear_active_reply())
+        self.reply_bar.add_widget(btn_cancel_rep)
+        container.add_widget(self.reply_bar)
+
+        # Quick 1-Tap Responses Toolbar (Clean text buttons, 0% tofu boxes)
+        self.chat_emoji_bar = BoxLayout(
+            orientation='horizontal',
+            size_hint_y=None,
+            height=dp(28),
+            padding=[dp(6), dp(1), dp(6), dp(1)],
+            spacing=dp(4)
+        )
+        quick_replies = ["Got it", "On it!", "Thanks!", "+1", "Done", "Reviewing", "In call", "BRB"]
+        for qr in quick_replies:
+            btn_qr = Button(
+                text=qr,
+                font_size='10sp',
+                bold=True,
+                size_hint_x=1.0 / len(quick_replies),
+                background_normal='',
+                background_color=get_color_from_hex("#1e293b"),
+                color=get_color_from_hex("#cbd5e1")
+            )
+            def _insert_qr(x, val=qr):
+                if hasattr(self, 'in_chat_msg') and self.in_chat_msg:
+                    self.in_chat_msg.text += (" " + val if self.in_chat_msg.text and not self.in_chat_msg.text.endswith(" ") else val)
+                    self.in_chat_msg.focus = True
+            btn_qr.bind(on_release=_insert_qr)
+            self.chat_emoji_bar.add_widget(btn_qr)
+        container.add_widget(self.chat_emoji_bar)
 
         # 4. Chat Input Bottom Bar (with soft-keyboard lift support)
         self.chat_input_bar = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(54), padding=[dp(6), dp(4), dp(6), dp(6)], spacing=dp(6))
@@ -3651,6 +4085,26 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         container.add_widget(self.chat_input_bar)
         return container
 
+    def set_active_reply(self, msg):
+        self.active_reply = msg
+        sender = msg.get("user_name", "Colleague")
+        txt = msg.get("text") or msg.get("file_name") or msg.get("title") or "message"
+        if hasattr(self, 'lbl_reply_preview') and self.lbl_reply_preview:
+            self.lbl_reply_preview.text = f"Replying to [b]{safe_escape_markup(sender)}[/b]: {safe_escape_markup(txt[:36])}"
+        if hasattr(self, 'reply_bar') and self.reply_bar:
+            self.reply_bar.height = dp(30)
+            self.reply_bar.opacity = 1
+            self.reply_bar.disabled = False
+        if hasattr(self, 'in_chat_msg') and self.in_chat_msg:
+            self.in_chat_msg.focus = True
+
+    def clear_active_reply(self):
+        self.active_reply = None
+        if hasattr(self, 'reply_bar') and self.reply_bar:
+            self.reply_bar.height = dp(0)
+            self.reply_bar.opacity = 0
+            self.reply_bar.disabled = True
+
     def init_lan_chat_engine(self):
         if not LANChatEngine:
             if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
@@ -3667,7 +4121,11 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 user_id=user_id,
                 device_id=device_id,
                 on_message=self._on_lan_message_received,
-                on_peers_change=self._on_lan_peers_changed
+                on_peers_change=self._on_lan_peers_changed,
+                on_message_deleted=self._on_lan_message_deleted,
+                on_reaction=self._on_lan_reaction_received,
+                on_poll_updated=self._on_lan_poll_updated,
+                on_pinned_change=self._on_lan_pinned_changed
             )
             self.chat_engine.start()
             self._update_network_status_labels()
@@ -3675,6 +4133,18 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             print(f"Error starting LAN Chat Engine on mobile: {e}")
             if hasattr(self, 'lbl_chat_status') and self.lbl_chat_status:
                 self.lbl_chat_status.text = f"LAN Init Error: {e}"
+
+    def _on_lan_message_deleted(self, target_id):
+        if KIVY_AVAILABLE and Clock:
+            Clock.schedule_once(lambda dt: self.refresh_chat_messages_ui(), 0)
+
+    def _on_lan_reaction_received(self, msg_id, reactions):
+        if KIVY_AVAILABLE and Clock:
+            Clock.schedule_once(lambda dt: self.refresh_chat_messages_ui(), 0)
+
+    def _on_lan_poll_updated(self, target_poll):
+        if KIVY_AVAILABLE and Clock:
+            Clock.schedule_once(lambda dt: self.refresh_chat_messages_ui(), 0)
 
     def rescan_lan_network(self, *args):
         if self.chat_engine:
@@ -3753,10 +4223,21 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             else:
                 self.add_message_bubble(msg_dict)
                 Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+        else:
+            rec_id = (msg_dict.get("recipient_id") or "").strip()
+            rec_name = (msg_dict.get("recipient_name") or "").strip().lower()
+            my_id = (self.chat_engine.user_id if self.chat_engine else "").strip()
+            my_name = ((self.chat_engine.user_name if self.chat_engine else "") or "").strip().lower()
+            if rec_id and (rec_id == my_id or (my_name and rec_name == my_name)):
+                self._show_incoming_dm_banner(msg_dict)
+                if self.current_tab != "chat":
+                    self.unread_chat_count += 1
+                    self.btn_tab_chat.text = f"Chat [{self.unread_chat_count}]"
 
     def switch_to_dm(self, peer=None):
         """Switches between Public Team Room and 1-on-1 Private Direct Message."""
         self.active_dm_peer = peer
+        self._hide_incoming_dm_banner()
         if peer:
             p_name = peer.get('user_name', 'Colleague')
             p_ip = peer.get('ip', '')
@@ -3914,6 +4395,19 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             b_tasks.bind(on_release=self.share_today_tasks_to_chat)
             self.team_strip_layout.add_widget(b_tasks)
 
+            b_poll = Button(
+                text="+ Poll",
+                font_size='11sp',
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(58), dp(32)),
+                background_normal='',
+                background_color=get_color_from_hex("#f59e0b"),
+                color=(1, 1, 1, 1)
+            )
+            b_poll.bind(on_release=self.open_create_poll_popup)
+            self.team_strip_layout.add_widget(b_poll)
+
             b_add_ip = Button(
                 text="+ IP",
                 font_size='11sp',
@@ -3927,6 +4421,19 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             b_add_ip.bind(on_release=self.open_custom_ip_popup)
             self.team_strip_layout.add_widget(b_add_ip)
 
+            b_fast_conn = Button(
+                text="Share IP",
+                font_size='11sp',
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(68), dp(32)),
+                background_normal='',
+                background_color=get_color_from_hex("#0284c7"),
+                color=(1, 1, 1, 1)
+            )
+            b_fast_conn.bind(on_release=self.open_fast_connect_popup)
+            self.team_strip_layout.add_widget(b_fast_conn)
+
             b_rescan = Button(
                 text="Rescan",
                 font_size='11sp',
@@ -3939,6 +4446,32 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             )
             b_rescan.bind(on_release=self.rescan_lan_network)
             self.team_strip_layout.add_widget(b_rescan)
+
+            b_export = Button(
+                text="Export",
+                font_size='11sp',
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(58), dp(32)),
+                background_normal='',
+                background_color=get_color_from_hex("#0d9488"),
+                color=(1, 1, 1, 1)
+            )
+            b_export.bind(on_release=self.open_export_chat_popup)
+            self.team_strip_layout.add_widget(b_export)
+
+            b_clear = Button(
+                text="Clear",
+                font_size='11sp',
+                bold=True,
+                size_hint=(None, None),
+                size=(dp(52), dp(32)),
+                background_normal='',
+                background_color=get_color_from_hex("#475569"),
+                color=(1, 1, 1, 1)
+            )
+            b_clear.bind(on_release=self.clear_chat_screen)
+            self.team_strip_layout.add_widget(b_clear)
 
     def open_online_team_popup(self, *args):
         if not self.chat_engine:
@@ -4171,16 +4704,340 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         content.add_widget(bottom_bar)
         popup.open()
 
+    def toggle_chat_search_bar(self, force_state=None):
+        is_open = hasattr(self, 'chat_search_bar') and self.chat_search_bar.height > dp(0)
+        new_state = (not is_open) if force_state is None else bool(force_state)
+        if hasattr(self, 'chat_search_bar') and self.chat_search_bar:
+            if new_state:
+                self.chat_search_bar.height = dp(34)
+                self.chat_search_bar.opacity = 1
+                self.chat_search_bar.disabled = False
+                if hasattr(self, 'in_chat_search') and self.in_chat_search:
+                    self.in_chat_search.focus = True
+            else:
+                self.chat_search_bar.height = dp(0)
+                self.chat_search_bar.opacity = 0
+                self.chat_search_bar.disabled = True
+                if hasattr(self, 'in_chat_search') and self.in_chat_search:
+                    self.in_chat_search.text = ""
+                if hasattr(self, 'lbl_chat_search_count') and self.lbl_chat_search_count:
+                    self.lbl_chat_search_count.text = ""
+                self.chat_search_query = ""
+                self.refresh_chat_messages_ui()
+
+    def _on_chat_search_text_changed(self, inst, text):
+        self.chat_search_query = text.strip()
+        self.refresh_chat_messages_ui()
+
+    def open_fast_connect_popup(self, *args):
+        my_ip = self.chat_engine.local_ip if self.chat_engine else "127.0.0.1"
+        my_name = self.chat_engine.user_name if self.chat_engine else "User"
+
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.75),
+            size_hint=(0.88, 0.48),
+            auto_dismiss=True
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0f172a",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#0284c7",
+            orientation='vertical',
+            padding=[dp(14), dp(14), dp(14), dp(14)],
+            spacing=dp(8)
+        )
+
+        modal.add_widget(Label(
+            text="[b]Fast LAN Connection Info[/b]",
+            markup=True,
+            font_size='14sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_y=None,
+            height=dp(22),
+            halign='center',
+            valign='middle'
+        ))
+
+        ip_card = RoundedCard(
+            bg_hex="#1e293b",
+            radius=[dp(8), dp(8), dp(8), dp(8)],
+            orientation='vertical',
+            size_hint_y=None,
+            height=dp(60),
+            padding=[dp(8), dp(6), dp(8), dp(6)],
+            spacing=dp(2)
+        )
+        ip_card.add_widget(Label(text=f"Your Device: [b]{safe_escape_markup(my_name)}[/b]", markup=True, font_size='11sp', color=get_color_from_hex("#cbd5e1")))
+        ip_card.add_widget(Label(text=f"Wi-Fi IP: [b]{my_ip}[/b]  |  Port: [b]5050[/b]", markup=True, font_size='13sp', bold=True, color=get_color_from_hex("#34d399")))
+        modal.add_widget(ip_card)
+
+        modal.add_widget(Label(
+            text="Share this IP with colleagues on the same Wi-Fi so they can tap '+ IP' and connect directly!",
+            font_size='11sp',
+            color=get_color_from_hex("#94a3b8"),
+            size_hint_y=None,
+            height=dp(34),
+            halign='center',
+            valign='middle'
+        ))
+
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_copy_ip = Button(
+            text="Copy My IP",
+            font_size='12sp',
+            bold=True,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        def _do_copy_ip(x):
+            if Clipboard:
+                try:
+                    Clipboard.copy(my_ip)
+                    self.show_popup("Copied!", f"Your IP '{my_ip}' copied to clipboard!\nShare with your team on WhatsApp, Slack or SMS.")
+                except Exception:
+                    pass
+        btn_copy_ip.bind(on_release=_do_copy_ip)
+        btn_row.add_widget(btn_copy_ip)
+
+        btn_close = Button(
+            text="Close",
+            font_size='12sp',
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close.bind(on_release=popup.dismiss)
+        btn_row.add_widget(btn_close)
+        modal.add_widget(btn_row)
+
+        popup.content = modal
+        popup.open()
+
+    def _update_pinned_banner_ui(self, pin_obj=None):
+        pin = pin_obj or (getattr(self.chat_engine, 'pinned_announcement', None) if self.chat_engine else None)
+        if not hasattr(self, 'chat_pin_banner') or not self.chat_pin_banner:
+            return
+        if pin and pin.get("text"):
+            raw_t = pin.get("text", "").replace("\n", " ")
+            if len(raw_t) > 60:
+                raw_t = raw_t[:57] + "..."
+            by_user = pin.get("user_name", "Team")
+            if hasattr(self, 'lbl_pin_text') and self.lbl_pin_text:
+                self.lbl_pin_text.text = f"[color=#38bdf8][b][PINNED]:[/b][/color] \"{safe_escape_markup(raw_t)}\" - [color=#94a3b8]{safe_escape_markup(by_user)}[/color]"
+            self.chat_pin_banner.height = dp(34)
+            self.chat_pin_banner.opacity = 1
+            self.chat_pin_banner.disabled = False
+        else:
+            self.chat_pin_banner.height = dp(0)
+            self.chat_pin_banner.opacity = 0
+            self.chat_pin_banner.disabled = True
+
+    def _show_incoming_dm_banner(self, msg_dict):
+        if not hasattr(self, 'chat_incoming_dm_banner') or not self.chat_incoming_dm_banner:
+            return
+        sender_name = msg_dict.get("user_name", "Colleague")
+        sender_id = msg_dict.get("sender_id", "")
+        sender_dev = msg_dict.get("device_id", "")
+        raw_prev = (msg_dict.get("text") or msg_dict.get("file_name") or msg_dict.get("title") or "New message").replace("\n", " ")
+        if len(raw_prev) > 40:
+            raw_prev = raw_prev[:37] + "..."
+
+        if hasattr(self, 'lbl_dm_banner_text') and self.lbl_dm_banner_text:
+            self.lbl_dm_banner_text.text = f"[DM] [b]{safe_escape_markup(sender_name)}[/b]: {safe_escape_markup(raw_prev)}"
+
+        peer_match = None
+        if self.chat_engine:
+            for p in self.chat_engine.get_online_peers().values():
+                if (sender_id and p.get("id") == sender_id) or (sender_dev and p.get("device_id") == sender_dev) or (p.get("user_name", "").lower() == sender_name.lower()):
+                    peer_match = p
+                    break
+        if not peer_match:
+            peer_match = {
+                "id": sender_id,
+                "device_id": sender_dev,
+                "user_name": sender_name,
+                "ip": msg_dict.get("file_ip", "")
+            }
+
+        def _open_dm_click(x, p=peer_match):
+            self._hide_incoming_dm_banner()
+            self.switch_to_dm(p)
+            if self.current_tab != "chat":
+                self.switch_tab("chat")
+
+        if hasattr(self, 'btn_open_incoming_dm') and self.btn_open_incoming_dm:
+            self.btn_open_incoming_dm.unbind(on_release=self.btn_open_incoming_dm.on_release if hasattr(self.btn_open_incoming_dm, 'on_release') else lambda *a: None)
+            self.btn_open_incoming_dm.bind(on_release=_open_dm_click)
+
+        self.chat_incoming_dm_banner.height = dp(36)
+        self.chat_incoming_dm_banner.opacity = 1
+        self.chat_incoming_dm_banner.disabled = False
+
+    def _hide_incoming_dm_banner(self):
+        if hasattr(self, 'chat_incoming_dm_banner') and self.chat_incoming_dm_banner:
+            self.chat_incoming_dm_banner.height = dp(0)
+            self.chat_incoming_dm_banner.opacity = 0
+            self.chat_incoming_dm_banner.disabled = True
+
+    def _on_lan_pinned_changed(self, pin_obj):
+        if KIVY_AVAILABLE and Clock:
+            Clock.schedule_once(lambda dt: self._update_pinned_banner_ui(pin_obj), 0)
+            Clock.schedule_once(lambda dt: self.refresh_chat_messages_ui(), 0)
+
+    def open_export_chat_popup(self, *args):
+        if not self.chat_engine:
+            self.show_popup("Notice", "LAN Chat is not initialized.")
+            return
+
+        filtered_msgs = [m for m in self.chat_engine.messages if self.message_matches_current_view(m)]
+        chan_title = self.active_dm_peer.get("user_name", "Direct Message") if self.active_dm_peer else "# Public Team Room"
+
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.75),
+            size_hint=(0.88, 0.52),
+            auto_dismiss=True
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0f172a",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#3b82f6",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
+
+        modal.add_widget(Label(
+            text=f"[b]Export Chat History[/b]\n[color=#94a3b8]{chan_title} | {len(filtered_msgs)} messages[/color]",
+            markup=True,
+            font_size='14sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_y=None,
+            height=dp(36),
+            halign='center',
+            valign='middle'
+        ))
+
+        def _do_copy(x):
+            popup.dismiss()
+            now_s = datetime.datetime.now().strftime("%Y-%m-%d %I:%M %p")
+            lines = [f"# Chat Export: {chan_title} ({now_s})", f"Total Messages: {len(filtered_msgs)}\n"]
+            for m in filtered_msgs:
+                s = m.get("user_name", "Colleague")
+                t = m.get("time_str", "")
+                txt = m.get("text") or m.get("file_name") or m.get("title") or ""
+                lines.append(f"[{t}] {s}: {txt}")
+            out_str = "\n".join(lines)
+            if Clipboard:
+                Clipboard.copy(out_str)
+                self.show_popup("Copied", f"Exported {len(filtered_msgs)} messages to clipboard!")
+
+        btn_copy = Button(
+            text="Copy Chat to Clipboard",
+            font_size='12sp',
+            bold=True,
+            size_hint_y=None,
+            height=dp(36),
+            background_normal='',
+            background_color=get_color_from_hex("#2563eb"),
+            color=(1, 1, 1, 1)
+        )
+        btn_copy.bind(on_release=_do_copy)
+        modal.add_widget(btn_copy)
+
+        def _do_save_file(x):
+            popup.dismiss()
+            try:
+                now_s = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                import re
+                clean_name = re.sub(r'[^a-zA-Z0-9_-]', '_', chan_title)
+                fn = f"chat_{clean_name}_{now_s}.md"
+                export_path = get_storage_path(fn)
+                if export_chat_history:
+                    export_chat_history(filtered_msgs, export_path, format_type="markdown", channel_name=chan_title)
+                else:
+                    lines = [f"# Chat Export: {chan_title}\n"]
+                    for m in filtered_msgs:
+                        s = m.get("user_name", "Colleague")
+                        t = m.get("time_str", "")
+                        txt = m.get("text") or m.get("file_name") or m.get("title") or ""
+                        lines.append(f"[{t}] {s}: {txt}")
+                    with open(export_path, "w", encoding="utf-8") as f:
+                        f.write("\n".join(lines))
+                self.show_popup("Saved", f"Chat exported successfully to:\n{fn}")
+            except Exception as e:
+                self.show_popup("Error", f"Failed to save file: {e}")
+
+        btn_file = Button(
+            text="Save as Markdown (.md) File",
+            font_size='12sp',
+            bold=True,
+            size_hint_y=None,
+            height=dp(36),
+            background_normal='',
+            background_color=get_color_from_hex("#059669"),
+            color=(1, 1, 1, 1)
+        )
+        btn_file.bind(on_release=_do_save_file)
+        modal.add_widget(btn_file)
+
+        btn_close = Button(
+            text="Cancel",
+            font_size='12sp',
+            size_hint_y=None,
+            height=dp(32),
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close.bind(on_release=popup.dismiss)
+        modal.add_widget(btn_close)
+
+        popup.content = modal
+        popup.open()
+
+    def clear_chat_screen(self, *args):
+        if hasattr(self, 'chat_list_layout') and self.chat_list_layout:
+            self.chat_list_layout.clear_widgets()
+            self.rendered_msg_ids.clear()
+            self.show_popup("Display Cleared", "Chat view cleared. New incoming messages will continue to display.")
+
     def refresh_chat_messages_ui(self):
         if not hasattr(self, 'chat_list_layout') or not self.chat_list_layout:
             return
         self.chat_list_layout.clear_widgets()
         self.rendered_msg_ids.clear()
+        self._update_pinned_banner_ui()
 
         if not self.chat_engine:
             return
 
         filtered_msgs = [m for m in self.chat_engine.messages if self.message_matches_current_view(m)]
+
+        q = getattr(self, 'chat_search_query', '').strip().lower()
+        if q:
+            filtered_msgs = [
+                m for m in filtered_msgs
+                if q in str(m.get("text") or "").lower()
+                or q in str(m.get("user_name") or "").lower()
+                or q in str(m.get("file_name") or "").lower()
+                or q in str(m.get("title") or "").lower()
+                or q in str(m.get("caption") or "").lower()
+            ]
+            if hasattr(self, 'lbl_chat_search_count') and self.lbl_chat_search_count:
+                c = len(filtered_msgs)
+                self.lbl_chat_search_count.text = f"{c} found" if c > 0 else "0 found"
+        else:
+            if hasattr(self, 'lbl_chat_search_count') and self.lbl_chat_search_count:
+                self.lbl_chat_search_count.text = ""
 
         for msg in filtered_msgs[-60:]:
             self.add_message_bubble(msg)
@@ -4206,6 +5063,59 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         elif ext in ('.py', '.js', '.json', '.xml', '.html', '.css', '.sh', '.c', '.cpp'):
             return {"label": "CODE", "color": "#38bdf8", "icon_txt": "CODE"}
         return {"label": "FILE", "color": "#64748b", "icon_txt": "FILE"}
+
+    def _parse_shared_note_text(self, text):
+        clean = text or ""
+        if clean.startswith("[NOTE]"):
+            clean = clean[len("[NOTE]"):].strip()
+        lines = clean.split("\n", 1)
+        header_line = lines[0].strip()
+        body = lines[1].strip() if len(lines) > 1 else ""
+
+        title = header_line
+        import re
+        m_b = re.search(r"\[b\](.*?)\[/b\]", header_line)
+        if m_b:
+            title = m_b.group(1).strip()
+            if title.lower().startswith("shared note:"):
+                title = title[len("shared note:"):].strip()
+        else:
+            title = re.sub(r"\(.*?\)", "", header_line).strip()
+
+        m_t = re.search(r"\((?:\[color=[^\]]+\])?([^\[\)]+)(?:\[/color\])?\)", header_line)
+        tag = m_t.group(1).strip() if m_t else "General"
+
+        return {
+            "title": title or "Shared Note",
+            "tag": tag or "General",
+            "content": body
+        }
+
+    def _save_received_note_to_local(self, title, tag, content):
+        try:
+            notes = load_notes() if 'load_notes' in globals() else []
+            for n in notes:
+                if n.get("title") == title and n.get("content") == content:
+                    self.show_popup("Already Saved", f"Note '{title}' is already in your notes list.")
+                    return
+            now_str = datetime.datetime.now().strftime("%b %d, %I:%M %p")
+            new_n = {
+                "id": str(int(time.time() * 1000)),
+                "title": title,
+                "tag": tag or "Work",
+                "content": content,
+                "created_at": now_str,
+                "updated_at": now_str,
+                "is_pinned": False
+            }
+            notes.insert(0, new_n)
+            if 'save_notes' in globals():
+                save_notes(notes)
+            self.refresh_notes_list()
+            self.auto_sync_notes_to_gsheet()
+            self.show_popup("Note Saved", f"Note '{title}' saved to your Notes tab!")
+        except Exception as e:
+            self.show_popup("Error", f"Failed to save note: {e}")
 
     def add_message_bubble(self, msg):
         msg_id = msg.get("id")
@@ -4248,15 +5158,20 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             spacing=dp(4)
         )
 
-        # Header Row: Sender Name on left, Timestamp on right
+        # Header Row: Sender Name on left, Timestamp and 3-dots actions on right
         header_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(18), spacing=dp(4))
         sender_color = "#93c5fd" if is_me else "#38bdf8"
+        is_pinned_msg = bool(msg.get("is_pinned")) or (
+            self.chat_engine and getattr(self.chat_engine, "pinned_announcement", None) and
+            self.chat_engine.pinned_announcement.get("msg_id") == msg_id
+        )
+        pin_badge = "[color=#f59e0b][PIN] [/color]" if is_pinned_msg else ""
         lbl_sender = Label(
-            text=f"[b]{'You' if is_me else sender}[/b]",
+            text=f"{pin_badge}[b]{'You' if is_me else sender}[/b]",
             markup=True,
             font_size='11sp',
             color=get_color_from_hex(sender_color),
-            size_hint_x=0.65,
+            size_hint_x=0.54,
             halign='left',
             valign='middle'
         )
@@ -4267,13 +5182,56 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             text=time_s,
             font_size='10sp',
             color=get_color_from_hex("#94a3b8"),
-            size_hint_x=0.35,
+            size_hint_x=0.32,
             halign='right',
             valign='middle'
         )
         lbl_time.bind(size=lbl_time.setter('text_size'))
         header_row.add_widget(lbl_time)
+
+        btn_more = Button(
+            text="...",
+            font_size='13sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(28), dp(18)),
+            background_normal='',
+            background_color=(0, 0, 0, 0),
+            color=get_color_from_hex("#cbd5e1")
+        )
+        btn_more.bind(on_release=lambda x, m=msg: self.open_message_actions_popup(m))
+        header_row.add_widget(btn_more)
         bubble.add_widget(header_row)
+
+        # Quoted reply indicator inside message bubble
+        reply_info = msg.get("reply_to")
+        if reply_info and isinstance(reply_info, dict):
+            r_sender = safe_escape_markup(reply_info.get("user_name", "Colleague"))
+            r_text = safe_escape_markup((reply_info.get("text") or reply_info.get("file_name") or "")[:40])
+            quote_card = RoundedCard(
+                bg_hex="#0b1120",
+                radius=[dp(6), dp(6), dp(6), dp(6)],
+                border_hex="#3b82f6",
+                orientation='vertical',
+                size_hint_y=None,
+                height=dp(26),
+                padding=[dp(6), dp(2), dp(6), dp(2)]
+            )
+            quote_lbl = Label(
+                text=f"[color=#38bdf8][b]{r_sender}[/b][/color]: {r_text}",
+                markup=True,
+                font_size='10sp',
+                color=get_color_from_hex("#94a3b8"),
+                size_hint_y=None,
+                height=dp(22),
+                halign='left',
+                valign='middle',
+                shorten=True,
+                shorten_from='right'
+            )
+            quote_lbl.bind(size=quote_lbl.setter('text_size'))
+            quote_card.add_widget(quote_lbl)
+            bubble.add_widget(quote_card)
 
         if msg_type == "work_update":
             title = safe_escape_markup(msg.get("title", "Daily Work Update"))
@@ -4486,6 +5444,180 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             bubble.height = header_row.height + c_height + dp(16)
             row.height = bubble.height + dp(4)
 
+        elif msg_type == "poll":
+            q_txt = safe_escape_markup(msg.get("title") or msg.get("text") or "Team Poll")
+            options = msg.get("tasks") or []
+            total_votes = sum(len(opt.get("votes", [])) for opt in options)
+            my_n = (self.chat_engine.user_name if self.chat_engine else "").strip()
+
+            poll_card = RoundedCard(
+                bg_hex="#0b1120",
+                radius=[dp(8), dp(8), dp(8), dp(8)],
+                border_hex="#f59e0b",
+                orientation='vertical',
+                size_hint_y=None,
+                spacing=dp(5),
+                padding=[dp(8), dp(6), dp(8), dp(6)]
+            )
+
+            lbl_q = Label(
+                text=f"[b][POLL] {q_txt}[/b]",
+                markup=True,
+                font_size='13sp',
+                color=get_color_from_hex("#f59e0b"),
+                size_hint_y=None,
+                height=dp(20),
+                halign='left',
+                valign='middle'
+            )
+            lbl_q.bind(size=lbl_q.setter('text_size'))
+            poll_card.add_widget(lbl_q)
+
+            opt_h_total = 0
+            for opt in options:
+                opt_id = opt.get("id")
+                opt_t = safe_escape_markup(opt.get("text", "Option"))
+                v_list = opt.get("votes", [])
+                v_cnt = len(v_list)
+                pct = int((v_cnt / total_votes * 100)) if total_votes > 0 else 0
+                has_voted = my_n in v_list
+                v_icon = "[x] " if has_voted else "[ ] "
+
+                b_opt = Button(
+                    text=f"{v_icon}{opt_t}  ({pct}% - {v_cnt}v)",
+                    font_size='11sp',
+                    bold=has_voted,
+                    size_hint_y=None,
+                    height=dp(32),
+                    background_normal='',
+                    background_color=get_color_from_hex("#2563eb" if has_voted else "#1e293b"),
+                    color=(1, 1, 1, 1)
+                )
+                def _vote_click(x, pid=msg.get("id"), oid=opt_id):
+                    if self.chat_engine:
+                        self.chat_engine.cast_poll_vote(pid, oid)
+                        self.refresh_chat_messages_ui()
+                b_opt.bind(on_release=_vote_click)
+                poll_card.add_widget(b_opt)
+                opt_h_total += dp(37)
+
+            lbl_tot = Label(
+                text=f"{total_votes} total vote(s)",
+                font_size='10sp',
+                color=get_color_from_hex("#94a3b8"),
+                size_hint_y=None,
+                height=dp(16),
+                halign='right',
+                valign='middle'
+            )
+            lbl_tot.bind(size=lbl_tot.setter('text_size'))
+            poll_card.add_widget(lbl_tot)
+
+            card_h = dp(22) + opt_h_total + dp(20)
+            poll_card.height = card_h
+            bubble.add_widget(poll_card)
+            bubble.height = header_row.height + card_h + dp(14)
+            row.height = bubble.height + dp(4)
+
+        elif msg_type == "note" or (isinstance(msg.get("text"), str) and msg.get("text", "").startswith("[NOTE]")):
+            note_info = self._parse_shared_note_text(msg.get("text", ""))
+            n_title = safe_escape_markup(note_info["title"])
+            n_tag = safe_escape_markup(note_info["tag"])
+            n_body = note_info["content"]
+
+            note_card = RoundedCard(
+                bg_hex="#0b1329",
+                radius=[dp(8), dp(8), dp(8), dp(8)],
+                border_hex="#38bdf8",
+                orientation='vertical',
+                size_hint_y=None,
+                spacing=dp(5),
+                padding=[dp(8), dp(6), dp(8), dp(6)]
+            )
+
+            # Header row: [NOTE] badge + Title + Tag
+            n_head = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(20), spacing=dp(6))
+            lbl_badge = Label(
+                text="[b][NOTE][/b]",
+                markup=True,
+                font_size='10sp',
+                color=get_color_from_hex("#38bdf8"),
+                size_hint_x=None,
+                width=dp(55),
+                halign='left',
+                valign='middle'
+            )
+            lbl_badge.bind(size=lbl_badge.setter('text_size'))
+            n_head.add_widget(lbl_badge)
+
+            lbl_ntitle = Label(
+                text=f"[b]{n_title}[/b]",
+                markup=True,
+                font_size='12sp',
+                color=get_color_from_hex("#f8fafc"),
+                size_hint_x=1,
+                halign='left',
+                valign='middle',
+                shorten=True,
+                shorten_from='right'
+            )
+            lbl_ntitle.bind(size=lbl_ntitle.setter('text_size'))
+            n_head.add_widget(lbl_ntitle)
+
+            lbl_ntag = Label(
+                text=f"[color=#94a3b8]{n_tag}[/color]",
+                markup=True,
+                font_size='10sp',
+                size_hint_x=None,
+                width=dp(65),
+                halign='right',
+                valign='middle'
+            )
+            lbl_ntag.bind(size=lbl_ntag.setter('text_size'))
+            n_head.add_widget(lbl_ntag)
+            note_card.add_widget(n_head)
+
+            # Note body text
+            lbl_nbody = Label(
+                text=n_body or "(No content)",
+                font_size='12sp',
+                color=get_color_from_hex("#cbd5e1"),
+                size_hint_y=None,
+                halign='left',
+                valign='top'
+            )
+            def _bind_nbody(lbl, *args):
+                lbl.text_size = (lbl.width, None)
+                lbl.texture_update()
+                lbl.height = max(dp(22), lbl.texture_size[1] + dp(4))
+                note_card.height = dp(20) + lbl.height + dp(30) + dp(20)
+                bubble.height = header_row.height + note_card.height + dp(14)
+                row.height = bubble.height + dp(4)
+            lbl_nbody.bind(width=_bind_nbody)
+            lbl_nbody.height = dp(24)
+            note_card.add_widget(lbl_nbody)
+
+            # Action: Save to My Notes button
+            btn_save_note = Button(
+                text="Save to My Notes",
+                font_size='11sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(30),
+                background_normal='',
+                background_color=get_color_from_hex("#0284c7"),
+                color=(1, 1, 1, 1)
+            )
+            def _on_save_note_click(x, t=note_info["title"], tg=note_info["tag"], c=note_info["content"]):
+                self._save_received_note_to_local(t, tg, c)
+            btn_save_note.bind(on_release=_on_save_note_click)
+            note_card.add_widget(btn_save_note)
+
+            note_card.height = dp(20) + dp(24) + dp(30) + dp(20)
+            bubble.add_widget(note_card)
+            bubble.height = header_row.height + note_card.height + dp(14)
+            row.height = bubble.height + dp(4)
+
         else:
             body_text = msg.get("text", "")
             content_lbl = Label(
@@ -4509,6 +5641,46 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             bubble.height = header_row.height + content_lbl.height + dp(14)
             row.height = bubble.height + dp(4)
 
+        # Reactions display row at bottom of bubble (Safe text pills, 0% tofu)
+        rx_dict = msg.get("reactions") or {}
+        has_reactions = any(len(u) > 0 for u in rx_dict.values())
+        if has_reactions:
+            SAFE_EMOJI_LABELS = {
+                "👍": "+1",
+                "❤️": "Love",
+                "😂": "Haha",
+                "🎉": "Party",
+                "🚀": "Fire",
+                "🔥": "Fire",
+                "✅": "Done"
+            }
+            rx_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(22), spacing=dp(4))
+            for em, users in rx_dict.items():
+                if users:
+                    cnt = len(users)
+                    lbl_display = SAFE_EMOJI_LABELS.get(em, em)
+                    if any(ord(c) > 127 for c in lbl_display):
+                        lbl_display = "+1"
+                    pill = Button(
+                        text=f"{lbl_display} {cnt}",
+                        font_size='10sp',
+                        bold=True,
+                        size_hint=(None, None),
+                        size=(dp(max(40, len(lbl_display)*7 + len(str(cnt))*7 + 16)), dp(20)),
+                        background_normal='',
+                        background_color=get_color_from_hex("#334155"),
+                        color=(1, 1, 1, 1)
+                    )
+                    def _pill_click(x, m=msg, e=em):
+                        if self.chat_engine and m.get("id"):
+                            self.chat_engine.toggle_reaction(m["id"], e)
+                            self.refresh_chat_messages_ui()
+                    pill.bind(on_release=_pill_click)
+                    rx_row.add_widget(pill)
+            bubble.add_widget(rx_row)
+            bubble.height += dp(24)
+            row.height += dp(24)
+
         if is_me:
             row.add_widget(Widget(size_hint_x=0.15))
             row.add_widget(bubble)
@@ -4529,12 +5701,302 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if self.chat_engine:
             r_id = self.active_dm_peer.get("id", "") if self.active_dm_peer else ""
             r_name = self.active_dm_peer.get("user_name", "") if self.active_dm_peer else ""
+            reply_to = None
+            if getattr(self, 'active_reply', None):
+                reply_to = {
+                    "id": self.active_reply.get("id"),
+                    "user_name": self.active_reply.get("user_name", "Colleague"),
+                    "text": (self.active_reply.get("text") or self.active_reply.get("file_name") or self.active_reply.get("title") or "")[:50]
+                }
+                self.clear_active_reply()
+
             if hasattr(self.chat_engine, "send_chat_message"):
-                self.chat_engine.send_chat_message(text, recipient_id=r_id, recipient_name=r_name)
+                self.chat_engine.send_chat_message(text, reply_to=reply_to, recipient_id=r_id, recipient_name=r_name)
             elif hasattr(self.chat_engine, "send_broadcast_message"):
                 self.chat_engine.send_broadcast_message(text)
             self.in_chat_msg.text = ""
             Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+
+    def open_message_actions_popup(self, msg):
+        msg_id = msg.get("id")
+        is_me = bool(msg.get("is_me"))
+        sender = msg.get("user_name", "Colleague")
+        text_content = msg.get("text") or msg.get("file_name") or msg.get("title") or ""
+
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.75),
+            size_hint=(0.88, None),
+            height=dp(256),
+            auto_dismiss=True
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0f172a",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#3b82f6",
+            orientation='vertical',
+            size_hint=(1, 1),
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
+
+        # Header: Sender & Close button
+        hdr = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(22), spacing=dp(6))
+        lbl_hdr = Label(
+            text=f"Message from [b]{safe_escape_markup(sender)}[/b]",
+            markup=True,
+            font_size='13sp',
+            color=get_color_from_hex("#38bdf8"),
+            size_hint_x=0.82,
+            halign='left',
+            valign='middle'
+        )
+        lbl_hdr.bind(size=lbl_hdr.setter('text_size'))
+        hdr.add_widget(lbl_hdr)
+
+        btn_close = Button(
+            text="Close",
+            font_size='11sp',
+            bold=True,
+            size_hint=(None, None),
+            size=(dp(52), dp(22)),
+            background_normal='',
+            background_color=get_color_from_hex("#334155"),
+            color=(1, 1, 1, 1)
+        )
+        btn_close.bind(on_release=lambda x: popup.dismiss())
+        hdr.add_widget(btn_close)
+        modal.add_widget(hdr)
+
+        # 5 Quick Emoji Reactions (Styled text pills, 0% tofu boxes)
+        rx_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(34), spacing=dp(6))
+        reaction_options = [
+            ("+1", "#2563eb", "👍"),
+            ("Love", "#e11d48", "❤️"),
+            ("Haha", "#d97706", "😂"),
+            ("Party", "#9333ea", "🎉"),
+            ("Fire", "#ea580c", "🚀")
+        ]
+        for label_txt, color_hex, emo_val in reaction_options:
+            b_emo = Button(
+                text=label_txt,
+                font_size='12sp',
+                bold=True,
+                size_hint_x=0.2,
+                background_normal='',
+                background_color=get_color_from_hex(color_hex),
+                color=(1, 1, 1, 1)
+            )
+            def _do_rx(x, e_char=emo_val):
+                popup.dismiss()
+                if self.chat_engine and msg_id:
+                    self.chat_engine.toggle_reaction(msg_id, e_char)
+                    self.refresh_chat_messages_ui()
+            b_emo.bind(on_release=_do_rx)
+            rx_row.add_widget(b_emo)
+        modal.add_widget(rx_row)
+
+        # Action: Copy Text
+        btn_copy = Button(
+            text="Copy Text / Details",
+            font_size='13sp',
+            bold=True,
+            size_hint_y=None,
+            height=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            color=(1, 1, 1, 1)
+        )
+        def _do_copy(x):
+            popup.dismiss()
+            if text_content and Clipboard:
+                try:
+                    Clipboard.copy(text_content)
+                    self.show_popup("Copied", "Message text copied to clipboard!")
+                except Exception as e:
+                    pass
+        btn_copy.bind(on_release=_do_copy)
+        modal.add_widget(btn_copy)
+
+        # Action: Reply
+        btn_rep = Button(
+            text="Reply / Quote",
+            font_size='13sp',
+            bold=True,
+            size_hint_y=None,
+            height=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#2563eb"),
+            color=(1, 1, 1, 1)
+        )
+        def _do_rep(x):
+            popup.dismiss()
+            self.set_active_reply(msg)
+        btn_rep.bind(on_release=_do_rep)
+        modal.add_widget(btn_rep)
+
+        # Action: Pin Announcement
+        is_ann = bool(msg.get("is_pinned")) or (
+            self.chat_engine and getattr(self.chat_engine, "pinned_announcement", None) and
+            self.chat_engine.pinned_announcement.get("msg_id") == msg_id
+        )
+        btn_pin = Button(
+            text="Unpin Announcement" if is_ann else "Pin as Announcement",
+            font_size='13sp',
+            bold=True,
+            size_hint_y=None,
+            height=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#d97706" if is_ann else "#1e293b"),
+            color=(1, 1, 1, 1)
+        )
+        def _do_pin(x):
+            popup.dismiss()
+            if self.chat_engine and msg_id:
+                if is_ann:
+                    self.chat_engine.unpin_announcement()
+                else:
+                    self.chat_engine.pin_message(msg_id)
+                self.refresh_chat_messages_ui()
+        btn_pin.bind(on_release=_do_pin)
+        modal.add_widget(btn_pin)
+
+        # Action: Delete
+        btn_del = Button(
+            text="Delete for Everyone" if is_me else "Delete for Me",
+            font_size='13sp',
+            bold=True,
+            size_hint_y=None,
+            height=dp(34),
+            background_normal='',
+            background_color=get_color_from_hex("#ef4444"),
+            color=(1, 1, 1, 1)
+        )
+        def _do_del(x):
+            popup.dismiss()
+            if self.chat_engine and msg_id:
+                self.chat_engine.delete_message(msg_id, broadcast=is_me)
+                self.refresh_chat_messages_ui()
+        btn_del.bind(on_release=_do_del)
+        modal.add_widget(btn_del)
+
+        popup.content = modal
+        popup.open()
+
+    def open_create_poll_popup(self, *args):
+        if not self.chat_engine:
+            self.show_popup("Notice", "LAN Chat is not initialized.")
+            return
+
+        popup = Popup(
+            title="",
+            separator_height=0,
+            background='',
+            background_color=(0, 0, 0, 0.75),
+            size_hint=(0.92, 0.65),
+            auto_dismiss=True
+        )
+
+        modal = RoundedCard(
+            bg_hex="#0f172a",
+            radius=[dp(16), dp(16), dp(16), dp(16)],
+            border_hex="#f59e0b",
+            orientation='vertical',
+            padding=[dp(14), dp(12), dp(14), dp(12)],
+            spacing=dp(8)
+        )
+
+        dm_name = (self.active_dm_peer.get("user_name", "") if self.active_dm_peer else "") or ""
+        target_str = f"Private Poll with {dm_name}" if dm_name else "Team Poll (# Public Room)"
+
+        lbl_head = Label(
+            text=f"[b]Create {target_str}[/b]",
+            markup=True,
+            font_size='14sp',
+            color=get_color_from_hex("#f59e0b"),
+            size_hint_y=None,
+            height=dp(24),
+            halign='left',
+            valign='middle'
+        )
+        lbl_head.bind(size=lbl_head.setter('text_size'))
+        modal.add_widget(lbl_head)
+
+        in_q = TextInput(
+            hint_text="Poll question (e.g. Ready for daily standup?)",
+            multiline=False,
+            font_size='13sp',
+            size_hint_y=None,
+            height=dp(38),
+            background_normal='',
+            background_color=get_color_from_hex("#1e293b"),
+            foreground_color=(1, 1, 1, 1),
+            hint_text_color=get_color_from_hex("#64748b"),
+            padding=[dp(10), dp(10)]
+        )
+        modal.add_widget(in_q)
+
+        opt_inputs = []
+        for i, placeholder in enumerate(["Yes", "No", "Option 3 (Optional)", "Option 4 (Optional)"]):
+            inp = TextInput(
+                hint_text=placeholder,
+                text=placeholder if i < 2 else "",
+                multiline=False,
+                font_size='12sp',
+                size_hint_y=None,
+                height=dp(34),
+                background_normal='',
+                background_color=get_color_from_hex("#1e293b"),
+                foreground_color=(1, 1, 1, 1),
+                hint_text_color=get_color_from_hex("#64748b"),
+                padding=[dp(8), dp(8)]
+            )
+            opt_inputs.append(inp)
+            modal.add_widget(inp)
+
+        btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(8))
+        btn_create = Button(
+            text="Create Poll",
+            font_size='13sp',
+            bold=True,
+            background_normal='',
+            background_color=get_color_from_hex("#f59e0b"),
+            color=(1, 1, 1, 1)
+        )
+        def _do_create(x):
+            q = in_q.text.strip()
+            if not q:
+                self.show_popup("Notice", "Please enter a poll question.")
+                return
+            opts = [inp.text.strip() for inp in opt_inputs if inp.text.strip()]
+            if len(opts) < 2:
+                self.show_popup("Notice", "Please enter at least 2 options for the poll.")
+                return
+            r_id = (self.active_dm_peer.get("id", "") if self.active_dm_peer else "") or ""
+            r_name = (self.active_dm_peer.get("user_name", "") if self.active_dm_peer else "") or ""
+            popup.dismiss()
+            self.chat_engine.create_poll(q, opts, recipient_id=r_id, recipient_name=r_name)
+            self.refresh_chat_messages_ui()
+            Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
+
+        btn_create.bind(on_release=_do_create)
+        btn_cancel = Button(
+            text="Cancel",
+            font_size='13sp',
+            background_normal='',
+            background_color=get_color_from_hex("#475569"),
+            color=(1, 1, 1, 1)
+        )
+        btn_cancel.bind(on_release=popup.dismiss)
+        btn_row.add_widget(btn_create)
+        btn_row.add_widget(btn_cancel)
+        modal.add_widget(btn_row)
+
+        popup.content = modal
+        popup.open()
 
     def open_file_picker_popup(self, *args):
         if not self.chat_engine:
@@ -4794,7 +6256,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         # Bottom Buttons
         btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
         dm_target_name = (self.active_dm_peer.get("user_name", "") if self.active_dm_peer else "") or ""
-        pop_title = f"🔒 Send File to {dm_target_name} (Private)" if dm_target_name else "Share File with Public Team Room"
+        pop_title = f"[Private] Send File to {dm_target_name}" if dm_target_name else "Share File with Public Team Room"
         popup = Popup(title=pop_title, content=content, size_hint=(0.96, 0.88))
 
         if is_android():
@@ -6747,18 +8209,30 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         btn_cancel = Button(
             text="Cancel",
             font_size='13sp',
-            size_hint_x=0.35,
+            size_hint_x=0.25,
             background_normal='',
             background_color=get_color_from_hex("#475569"),
             color=(1, 1, 1, 1)
         )
         bottom_bar.add_widget(btn_cancel)
 
-        btn_save = Button(
-            text="Save All Settings",
-            font_size='14sp',
+        btn_backup = Button(
+            text="Backup",
+            font_size='13sp',
             bold=True,
-            size_hint_x=0.65,
+            size_hint_x=0.28,
+            background_normal='',
+            background_color=get_color_from_hex("#0284c7"),
+            color=(1, 1, 1, 1)
+        )
+        btn_backup.bind(on_release=lambda x: self.export_all_user_data())
+        bottom_bar.add_widget(btn_backup)
+
+        btn_save = Button(
+            text="Save Settings",
+            font_size='13sp',
+            bold=True,
+            size_hint_x=0.47,
             background_normal='',
             background_color=get_color_from_hex("#16a34a"),
             color=(1, 1, 1, 1)
@@ -6848,11 +8322,173 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         _switch_tab(0)
         popup.open()
 
+    def export_all_user_data(self):
+        try:
+            notes = load_notes() if 'load_notes' in globals() else []
+            settings = load_settings() if 'load_settings' in globals() else {}
+            shift_timer = load_shift_timer() if 'load_shift_timer' in globals() else {}
+            reminders = load_reminders() if 'load_reminders' in globals() else []
+
+            backup_data = {
+                "version": "2.0",
+                "app": "WorkPulse",
+                "exported_at": datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+                "device_id": get_or_create_device_id() if 'get_or_create_device_id' in globals() else "local",
+                "settings": settings,
+                "notes": notes,
+                "shift_timer": shift_timer,
+                "reminders": reminders
+            }
+            backup_json = json.dumps(backup_data, indent=2, ensure_ascii=False)
+            now_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_fn = f"workpulse_backup_{now_str}.json"
+            backup_path = get_storage_path(backup_fn)
+            with open(backup_path, "w", encoding="utf-8") as f:
+                f.write(backup_json)
+
+            popup = Popup(
+                title="",
+                separator_height=0,
+                background='',
+                background_color=(0, 0, 0, 0.75),
+                size_hint=(0.88, 0.44),
+                auto_dismiss=True
+            )
+            modal = RoundedCard(
+                bg_hex="#0f172a",
+                radius=[dp(16), dp(16), dp(16), dp(16)],
+                border_hex="#10b981",
+                orientation='vertical',
+                padding=[dp(14), dp(12), dp(14), dp(12)],
+                spacing=dp(8)
+            )
+            modal.add_widget(Label(
+                text=f"[b]Backup Created Successfully[/b]\n[color=#94a3b8]{len(notes)} notes | {len(reminders)} alerts | Settings[/color]",
+                markup=True,
+                font_size='14sp',
+                color=get_color_from_hex("#34d399"),
+                size_hint_y=None,
+                height=dp(36),
+                halign='center',
+                valign='middle'
+            ))
+            modal.add_widget(Label(
+                text=f"Saved locally to:\n[color=#38bdf8]{backup_fn}[/color]",
+                markup=True,
+                font_size='11sp',
+                color=get_color_from_hex("#cbd5e1"),
+                size_hint_y=None,
+                height=dp(32),
+                halign='center'
+            ))
+            def _copy_b(x):
+                popup.dismiss()
+                if Clipboard:
+                    Clipboard.copy(backup_json)
+                    self.show_popup("Copied", "Full backup JSON copied to clipboard!")
+            btn_cp = Button(
+                text="Copy Backup JSON to Clipboard",
+                font_size='12sp',
+                bold=True,
+                size_hint_y=None,
+                height=dp(36),
+                background_normal='',
+                background_color=get_color_from_hex("#0284c7")
+            )
+            btn_cp.bind(on_release=_copy_b)
+            modal.add_widget(btn_cp)
+
+            btn_cl = Button(
+                text="Close",
+                font_size='12sp',
+                size_hint_y=None,
+                height=dp(32),
+                background_normal='',
+                background_color=get_color_from_hex("#334155")
+            )
+            btn_cl.bind(on_release=popup.dismiss)
+            modal.add_widget(btn_cl)
+
+            popup.content = modal
+            popup.open()
+        except Exception as e:
+            self.show_popup("Backup Error", f"Failed to create backup: {e}")
+
     # =========================================================================
     # FORM ACTIONS & INTEGRATIONS
     # =========================================================================
     def set_today(self):
         self.in_date.text = datetime.date.today().strftime("%Y-%m-%d")
+
+    def _restore_shift_timer_state(self):
+        saved = load_shift_timer()
+        if saved and saved.get("is_active"):
+            self.shift_start_ts = saved.get("start_ts", time.time())
+            self.shift_login_str = saved.get("login_str", "")
+            if hasattr(self, 'in_login') and self.in_login and self.shift_login_str:
+                self.in_login.text = self.shift_login_str
+            if hasattr(self, 'btn_shift_punch') and self.btn_shift_punch:
+                self.btn_shift_punch.text = "Stop Shift"
+                self.btn_shift_punch.background_color = get_color_from_hex("#ef4444")
+            self._update_shift_timer_tick(0)
+            Clock.schedule_interval(self._update_shift_timer_tick, 30)
+
+    def _update_shift_timer_tick(self, dt):
+        if not getattr(self, 'shift_start_ts', None):
+            return
+        elapsed_sec = max(0, time.time() - self.shift_start_ts)
+        hrs = int(elapsed_sec // 3600)
+        mins = int((elapsed_sec % 3600) // 60)
+        disp = f"Active: {hrs:02d}h {mins:02d}m"
+        if hasattr(self, 'lbl_shift_timer_status') and self.lbl_shift_timer_status:
+            self.lbl_shift_timer_status.text = disp
+            self.lbl_shift_timer_status.color = get_color_from_hex("#38bdf8")
+
+    def toggle_shift_timer(self, *args):
+        is_active = bool(getattr(self, 'shift_start_ts', None))
+        if not is_active:
+            # Start Shift
+            self.shift_start_ts = time.time()
+            now_dt = datetime.datetime.now()
+            self.shift_login_str = now_dt.strftime("%I:%M %p")
+            if hasattr(self, 'in_login') and self.in_login:
+                self.in_login.text = self.shift_login_str
+            if hasattr(self, 'btn_shift_punch') and self.btn_shift_punch:
+                self.btn_shift_punch.text = "Stop Shift"
+                self.btn_shift_punch.background_color = get_color_from_hex("#ef4444")
+            save_shift_timer({
+                "is_active": True,
+                "start_ts": self.shift_start_ts,
+                "login_str": self.shift_login_str
+            })
+            self._update_shift_timer_tick(0)
+            Clock.schedule_interval(self._update_shift_timer_tick, 30)
+            self.show_popup("Shift Started", f"Work shift timer started at {self.shift_login_str}.\nLogin time updated automatically!")
+        else:
+            # Stop Shift
+            now_ts = time.time()
+            now_dt = datetime.datetime.now()
+            logout_str = now_dt.strftime("%I:%M %p")
+            elapsed_sec = max(0, now_ts - self.shift_start_ts)
+            elapsed_hrs = max(0.1, round(elapsed_sec / 3600.0, 1))
+
+            if hasattr(self, 'in_logout') and self.in_logout:
+                self.in_logout.text = logout_str
+            if hasattr(self, 'in_hours') and self.in_hours:
+                self.in_hours.text = f"{elapsed_hrs:.1f}"
+
+            Clock.unschedule(self._update_shift_timer_tick)
+            self.shift_start_ts = None
+            save_shift_timer({"is_active": False})
+
+            if hasattr(self, 'btn_shift_punch') and self.btn_shift_punch:
+                self.btn_shift_punch.text = "Start Shift"
+                self.btn_shift_punch.background_color = get_color_from_hex("#059669")
+            if hasattr(self, 'lbl_shift_timer_status') and self.lbl_shift_timer_status:
+                self.lbl_shift_timer_status.text = f"Last Shift: {elapsed_hrs:.1f}h"
+                self.lbl_shift_timer_status.color = get_color_from_hex("#10b981")
+
+            self.show_popup("Shift Ended", f"Shift finished successfully!\n\n- Duration: {elapsed_hrs:.1f} hours\n- Shift: {getattr(self, 'shift_login_str', '')} to {logout_str}\n\nTask hours set to {elapsed_hrs:.1f}h automatically.")
 
     def clear_form(self, *args):
         self.in_title.text = ""

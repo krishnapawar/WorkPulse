@@ -189,7 +189,24 @@ python3 app.py
 
 ### 🤖 4. Android (APK)
 
-WorkPulse includes full support for building an Android mobile APK (`.apk`) using [Buildozer](https://buildozer.readthedocs.io/) and GitHub Actions.
+WorkPulse includes a complete mobile application (`mobile_app.py`) built with Kivy and packaged with [Buildozer](https://buildozer.readthedocs.io/).
+
+#### 📱 Mobile App Highlights:
+* **👆 Horizontal Swipe Tab Navigation**: Fluid left/right swipe gestures to navigate between **Log Work** ⟷ **Updates** ⟷ **Notes** ⟷ **Chat** ⟷ **Alerts**.
+* **⏱️ 1-Tap Live Shift Timer (Punch Clock)**: Tap **Start Shift** to begin; automatically tracks worked hours with a live timer and logs start/end times upon punch out. Persistent across app restarts.
+* **🎯 Weekly Target & Daily Streak Tracker**: Real-time progress bar towards your 40h weekly goal (with color transitions from blue to emerald and gold) paired with consecutive daily work streaks.
+* **📝 Notes with Interactive Checklists**: Create pinned notes, toggle checklist items (`- [ ]`) directly on-screen, launch templates (*Checklist, Meeting, Standup, Idea, Urgent*), search, filter by color category, and 2-way sync with Google Sheets.
+* **💬 Full-Featured LAN Team Chat & Direct Messaging**:
+  * **Direct 1-on-1 DMs**: Packet-isolated private messaging with colleagues across your local Wi-Fi.
+  * **📌 Pinned Announcement Banner**: Persistent team announcements synced in real-time across both desktop and mobile.
+  * **🔒 Incoming DM Alert Banners**: Floating notifications when a private message arrives with a 1-tap **Open DM** action.
+  * **😀 1-Tap Quick Emoji Toolbar**: Instant access to `👍`, `❤️`, `😊`, `🔥`, `🎉`, `✅`, `🚀`, `👏`, `🙏`, `🙌` right above the input bar.
+  * **💬 Message Actions (`⋮`)**: 5 emoji reactions, Quoted Replies, Copy Text, Message Deletion, and Pin as Announcement.
+  * **📝 Styled Note Cards**: Shared notes render as styled cards with a 1-tap **Save to My Notes** button.
+  * **📁 3-Action File Sharing**: Direct **Play Video / View Image**, **Download**, and **Save** to phone storage.
+  * **🗳️ Interactive Team Polls**: Create surveys and vote with real-time percentage progress bars.
+  * **📤 Chat Export**: Export chat history to Markdown (`.md`) or copy transcript to clipboard.
+* **📦 1-Click Backup**: Export a complete JSON snapshot of all your notes, shift timer, reminders, and settings.
 
 #### Method A: 1-Click Cloud Build with GitHub Actions (Recommended - Zero Setup)
 1. Push your code to your GitHub repository:
@@ -207,7 +224,7 @@ WorkPulse includes full support for building an Android mobile APK (`.apk`) usin
    chmod +x build_apk.sh
    ./build_apk.sh
    ```
-   *(Automatically installs OpenJDK 17, Cython, and Buildozer, downloads the Android SDK/NDK, and generates `dist/workpulse-1.0.0-arm64-v8a-debug.apk`).*
+   *(Generates `dist/workpulse.apk` ready for your phone).*
 
 2. Install on your Android phone:
    ```bash

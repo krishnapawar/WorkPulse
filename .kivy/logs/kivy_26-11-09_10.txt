@@ -1,0 +1,33 @@
+[INFO   ] Logger: Record log in /home/kali/Projects/python-pro/TodayWorkUpdateManager/.kivy/logs/kivy_26-11-09_10.txt
+[INFO   ] Kivy: v2.3.1
+[INFO   ] Kivy: Installed at "/usr/lib/python3/dist-packages/kivy/__init__.py"
+[INFO   ] Python: v3.14.8 (main, Oct  1 2026, 19:55:55) [GCC 16.2.0]
+[INFO   ] Python: Interpreter at "/usr/bin/python3"
+[INFO   ] Logger: Purge log fired. Processing...
+[INFO   ] Logger: Purge finished!
+[INFO   ] Factory: 195 symbols loaded
+[INFO   ] Image: Providers: img_tex, img_dds, img_sdl2 (img_pil, img_ffpyplayer ignored)
+[INFO   ] Text: Provider: sdl2(['text_pango'] ignored)
+[INFO   ] Window: Provider: sdl2
+[INFO   ] GL: Using the "OpenGL" graphics system
+[INFO   ] GL: Backend used <sdl2>
+[INFO   ] GL: OpenGL version <b'4.6 (Compatibility Profile) Mesa 26.0.8-1'>
+[INFO   ] GL: OpenGL vendor <b'AMD'>
+[INFO   ] GL: OpenGL renderer <b'AMD Radeon Graphics (radeonsi, renoir, ACO, DRM 3.64, 7.1.5+kali-amd64)'>
+[INFO   ] GL: OpenGL parsed version: 4, 6
+[INFO   ] GL: Shading version <b'4.60'>
+[INFO   ] GL: Texture max size <16384>
+[INFO   ] GL: Texture max units <32>
+[INFO   ] Window: auto add sdl2 input provider
+[INFO   ] Window: virtual keyboard not allowed, single mode, not docked
+[INFO   ] Clipboard: Provider: xclip
+[INFO   ] CutBuffer: cut buffer support enabled
+[INFO   ] GL: NPOT texture support is available
+[INFO   ] ProbeSysfs: device match: /dev/input/event7
+[INFO   ] MTD: Read event from </dev/input/event7>
+[INFO   ] ProbeSysfs: device match: /dev/input/event8
+[INFO   ] MTD: Read event from </dev/input/event8>
+[INFO   ] Base: Start application main loop
+[DEBUG  ] Starting new HTTPS connection (1): script.google.https:443
+[WARNING] MTD: Unable to open device "/dev/input/event7". Please ensure you have the appropriate permissions.
+[WARNING] MTD: Unable to open device "/dev/input/event8". Please ensure you have the appropriate permissions.

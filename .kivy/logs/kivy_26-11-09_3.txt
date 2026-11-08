@@ -33,3 +33,33 @@
 [WARNING] MTD: Unable to open device "/dev/input/event8". Please ensure you have the appropriate permissions.
 [WARNING] Deprecated property "<BooleanProperty name=allow_stretch>" of object "<kivy.uix.image.Image object at 0x7f2f96d51310>" has been set, it will be removed in a future version
 [WARNING] Deprecated property "<BooleanProperty name=keep_ratio>" of object "<kivy.uix.image.Image object at 0x7f2f96d51310>" was accessed, it will be removed in a future version
+[INFO   ] Base: Leaving application in progress...
+[WARNING] stderr: Traceback (most recent call last):
+[WARNING] stderr:   File "/home/kali/Projects/python-pro/TodayWorkUpdateManager/mobile_app.py", line 7110, in <module>
+[WARNING] stderr:     row_gs_acts.add_widget(btn_fetch_now)
+[WARNING] stderr:     ^^^^^^^^^^^^^^^^^^^^^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/app.py", line 956, in run
+[WARNING] stderr:     runTouchApp()
+[WARNING] stderr:     ~~~~~~~~~~~^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/base.py", line 574, in runTouchApp
+[WARNING] stderr:     EventLoop.mainloop()
+[WARNING] stderr:     ~~~~~~~~~~~~~~~~~~^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/base.py", line 339, in mainloop
+[WARNING] stderr:     self.idle()
+[WARNING] stderr:     ~~~~~~~~~^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/base.py", line 379, in idle
+[WARNING] stderr:     Clock.tick()
+[WARNING] stderr:     ~~~~~~~~~~^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/clock.py", line 733, in tick
+[WARNING] stderr:     self.post_idle(ts, self.idle())
+[WARNING] stderr:                        ~~~~~~~~~^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/clock.py", line 689, in idle
+[WARNING] stderr:     usleep(1000000 * sleeptime)
+[WARNING] stderr:     ~~~~~~^^^^^^^^^^^^^^^^^^^^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/clock.py", line 965, in usleep
+[WARNING] stderr:     _usleep(microseconds, self._sleep_obj)
+[WARNING] stderr:     ~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+[WARNING] stderr:   File "/usr/lib/python3/dist-packages/kivy/clock.py", line 556, in _usleep
+[WARNING] stderr:     _libc_usleep(int(microseconds))
+[WARNING] stderr:     ~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^
+[WARNING] stderr: KeyboardInterrupt

@@ -1,0 +1,48 @@
+[INFO   ] Logger: Record log in /home/kali/Projects/python-pro/TodayWorkUpdateManager/.kivy/logs/kivy_26-11-09_5.txt
+[INFO   ] Kivy: v2.3.1
+[INFO   ] Kivy: Installed at "/usr/lib/python3/dist-packages/kivy/__init__.py"
+[INFO   ] Python: v3.14.8 (main, Oct  1 2026, 19:55:55) [GCC 16.2.0]
+[INFO   ] Python: Interpreter at "/usr/bin/python3"
+[INFO   ] Logger: Purge log fired. Processing...
+[INFO   ] Logger: Purge finished!
+[INFO   ] Factory: 195 symbols loaded
+[INFO   ] Image: Providers: img_tex, img_dds, img_sdl2 (img_pil, img_ffpyplayer ignored)
+[INFO   ] Text: Provider: sdl2(['text_pango'] ignored)
+[INFO   ] Window: Provider: sdl2
+[CRITICAL] Window: Unable to find any valuable Window provider. Please enable debug logging (e.g. add -d if running from the command line, or change the log level in the config) and re-run your app to identify potential causes
+sdl2 - RuntimeError: b'No available video device'
+  File "/usr/lib/python3/dist-packages/kivy/core/__init__.py", line 71, in core_select_lib
+    cls = cls()
+  File "/usr/lib/python3/dist-packages/kivy/core/window/window_sdl2.py", line 165, in __init__
+    super(WindowSDL, self).__init__()
+    ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3/dist-packages/kivy/core/window/__init__.py", line 1129, in __init__
+    self.create_window()
+    ~~~~~~~~~~~~~~~~~~^^
+  File "/usr/lib/python3/dist-packages/kivy/core/window/window_sdl2.py", line 316, in create_window
+    self.system_size = self._win.setup_window(
+                       ~~~~~~~~~~~~~~~~~~~~~~^
+        pos[0], pos[1], w, h, self.borderless,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.fullscreen, resizable, state,
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+        self.get_gl_backend_name())
+        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "kivy/core/window/_window_sdl2.pyx", line 121, in kivy.core.window._window_sdl2._WindowSDL2Storage.setup_window
+  File "kivy/core/window/_window_sdl2.pyx", line 76, in kivy.core.window._window_sdl2._WindowSDL2Storage.die
+
+x11 - ModuleNotFoundError: No module named 'kivy.core.window.window_x11'
+  File "/usr/lib/python3/dist-packages/kivy/core/__init__.py", line 59, in core_select_lib
+    mod = importlib.__import__(name='{2}.{0}.{1}'.format(
+        basemodule, modulename, base),
+        globals=globals(),
+        locals=locals(),
+        fromlist=[modulename], level=0)
+  File "<frozen importlib._bootstrap>", line 1485, in __import__
+  File "<frozen importlib._bootstrap>", line 1406, in _gcd_import
+  File "<frozen importlib._bootstrap>", line 1371, in _find_and_load
+  File "<frozen importlib._bootstrap>", line 1335, in _find_and_load_unlocked
+
+[INFO   ] Clipboard: Provider: xclip
+[INFO   ] CutBuffer: cut buffer support enabled
+[CRITICAL] App: Unable to get a Window, abort.
