@@ -3180,11 +3180,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         msg = f"[NOTE] [b]{title}[/b]  ([color=#38bdf8]{tag}[/color])\n{content}"
         try:
+            r_id = (self.active_dm_peer.get("id", "") if self.active_dm_peer else "") or ""
+            r_name = (self.active_dm_peer.get("user_name", "") if self.active_dm_peer else "") or ""
             if hasattr(self.chat_engine, "send_chat_message"):
-                self.chat_engine.send_chat_message(msg)
+                self.chat_engine.send_chat_message(msg, recipient_id=r_id, recipient_name=r_name)
             elif hasattr(self.chat_engine, "send_broadcast_message"):
                 self.chat_engine.send_broadcast_message(msg)
-            self.show_popup("Note Shared", f"Note '{title}' shared with the LAN team!")
+            if r_id:
+                self.show_popup("Note Shared", f"Note '{title}' shared privately with {r_name}!")
+            else:
+                self.show_popup("Note Shared", f"Note '{title}' shared with the LAN team!")
         except Exception as e:
             self.show_popup("Error", f"Failed to share note: {e}")
 
@@ -3689,32 +3694,58 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         if KIVY_AVAILABLE and Clock:
             Clock.schedule_once(lambda dt: self._update_network_status_labels(), 0)
 
-    def _handle_new_incoming_message(self, msg_dict):
-        r_id = msg_dict.get("recipient_id", "")
-        s_id = msg_dict.get("sender_id", "")
-        r_name = (msg_dict.get("recipient_name") or "").strip().lower()
-        s_name = (msg_dict.get("user_name") or "").strip().lower()
+    def message_matches_current_view(self, msg):
+        """Returns True if message belongs to current channel (Public room vs active DM peer)."""
+        recipient_id = (msg.get("recipient_id") or "").strip()
+        recipient_name = (msg.get("recipient_name") or "").strip().lower()
 
-        my_id = self.chat_engine.user_id if self.chat_engine else ""
-        my_dev = getattr(self.chat_engine, "device_id", "") if self.chat_engine else ""
-        my_name = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
+        if self.active_dm_peer is None:
+            # Public team room: only messages without recipient_id
+            return not recipient_id
 
-        is_relevant = False
-        if self.active_dm_peer:
-            target_id = self.active_dm_peer.get("id", "")
-            target_dev = self.active_dm_peer.get("device_id", "")
-            target_name = (self.active_dm_peer.get("user_name") or "").strip().lower()
+        # 1-on-1 DM channel: Match bidirectional communication with active_dm_peer
+        target_peer_id = (self.active_dm_peer.get("id") or "").strip()
+        target_dev = (self.active_dm_peer.get("device_id") or "").strip()
+        target_name = (self.active_dm_peer.get("user_name") or "").strip().lower()
 
-            if (r_id == target_id and s_id == my_id) or (r_id == my_id and s_id == target_id):
-                is_relevant = True
-            elif target_dev and ((r_id.endswith(target_dev) and s_id == my_id) or (s_id.endswith(target_dev) and r_id == my_id)):
-                is_relevant = True
-            elif target_name and ((s_name == target_name and (r_name == my_name or not r_name)) or (s_name == my_name and r_name == target_name)):
-                is_relevant = True
+        sender_id = (msg.get("sender_id") or "").strip()
+        sender_dev = (msg.get("device_id") or "").strip()
+        sender_name = (msg.get("user_name") or "").strip().lower()
+
+        my_id = (self.chat_engine.user_id if self.chat_engine else "").strip()
+        my_dev = (getattr(self.chat_engine, "device_id", "") if self.chat_engine else "").strip()
+        my_name = ((self.chat_engine.user_name if self.chat_engine else "") or "").strip().lower()
+
+        # Determine if message was sent by me
+        if msg.get("is_me") is not None and msg.get("is_me") != 0 and msg.get("is_me") != "0":
+            is_me = bool(msg.get("is_me"))
+        elif my_id and sender_id == my_id:
+            is_me = True
+        elif my_dev and (sender_dev == my_dev or sender_id.endswith(my_dev)):
+            is_me = True
+        elif my_name and sender_name == my_name:
+            is_me = True
         else:
-            if not r_id:
-                is_relevant = True
+            is_me = False
 
+        if is_me:
+            # Sent by me -> recipient must match target peer
+            return bool(
+                (target_peer_id and recipient_id == target_peer_id) or
+                (target_dev and (recipient_id.endswith(target_dev) or recipient_name == target_name)) or
+                (target_name and (recipient_name == target_name or target_name in recipient_id.lower()))
+            )
+        else:
+            # Sent by peer -> sender must match target peer, and message must be a direct message
+            peer_matches = bool(
+                (target_peer_id and sender_id == target_peer_id) or
+                (target_dev and (sender_id.endswith(target_dev) or sender_dev == target_dev)) or
+                (target_name and (sender_name == target_name or target_name in sender_id.lower()))
+            )
+            return peer_matches and bool(recipient_id)
+
+    def _handle_new_incoming_message(self, msg_dict):
+        is_relevant = self.message_matches_current_view(msg_dict)
         if is_relevant:
             if self.current_tab != "chat":
                 self.unread_chat_count += 1
@@ -4141,50 +4172,15 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         popup.open()
 
     def refresh_chat_messages_ui(self):
-        if not self.chat_engine:
+        if not hasattr(self, 'chat_list_layout') or not self.chat_list_layout:
             return
         self.chat_list_layout.clear_widgets()
         self.rendered_msg_ids.clear()
 
-        filtered_msgs = []
-        if self.active_dm_peer:
-            peer_id = self.active_dm_peer.get("id", "")
-            peer_dev = self.active_dm_peer.get("device_id", "")
-            peer_name = (self.active_dm_peer.get("user_name") or "").strip().lower()
-            my_id = self.chat_engine.user_id if self.chat_engine else ""
-            my_dev = getattr(self.chat_engine, "device_id", "") if self.chat_engine else ""
-            my_name = (self.chat_engine.user_name if self.chat_engine else "").strip().lower()
+        if not self.chat_engine:
+            return
 
-            for msg in self.chat_engine.messages:
-                r_id = msg.get("recipient_id", "")
-                s_id = msg.get("sender_id", "")
-                r_name = (msg.get("recipient_name") or "").strip().lower()
-                s_name = (msg.get("user_name") or "").strip().lower()
-                msg_dev = msg.get("device_id", "")
-
-                if msg.get("is_me") is not None:
-                    is_me_msg = bool(msg.get("is_me"))
-                elif my_id and s_id:
-                    is_me_msg = (s_id == my_id)
-                elif my_dev and msg_dev:
-                    is_me_msg = (msg_dev == my_dev)
-                else:
-                    is_me_msg = bool(my_name and s_name == my_name)
-
-                # Check if this message belongs to this DM
-                if (r_id and (r_id == peer_id or (peer_dev and r_id.endswith(peer_dev)))) and (s_id == my_id or is_me_msg):
-                    filtered_msgs.append(msg)
-                elif (s_id and (s_id == peer_id or (peer_dev and s_id.endswith(peer_dev)))) and (r_id == my_id or not r_id or r_name == my_name):
-                    filtered_msgs.append(msg)
-                elif r_name and peer_name and (
-                    (is_me_msg and r_name == peer_name) or
-                    ((not is_me_msg) and s_name == peer_name and (r_name == my_name or not r_name))
-                ):
-                    filtered_msgs.append(msg)
-        else:
-            for msg in self.chat_engine.messages:
-                if not msg.get("recipient_id"):
-                    filtered_msgs.append(msg)
+        filtered_msgs = [m for m in self.chat_engine.messages if self.message_matches_current_view(m)]
 
         for msg in filtered_msgs[-60:]:
             self.add_message_bubble(msg)
@@ -4416,8 +4412,8 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 except Exception:
                     pass
 
-            # Buttons Row - Dual buttons side-by-side
-            btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(6))
+            # Buttons Row - 3 Action buttons: View/Play, Download, and Save
+            btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(38), spacing=dp(4))
             ext_l = os.path.splitext(fn)[1].lower()
             is_video = ext_l in ('.mp4', '.mkv', '.avi', '.mov', '.3gp', '.webm', '.ts', '.m4v')
             is_audio = ext_l in ('.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.opus')
@@ -4434,20 +4430,29 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
             btn_view = Button(
                 text=view_txt,
-                font_size='11sp',
+                font_size='10sp',
                 bold=True,
-                size_hint_x=0.5,
+                size_hint_x=0.38,
                 background_normal='',
                 background_color=get_color_from_hex("#8b5cf6" if is_video or is_audio else "#0284c7"),
                 color=(1, 1, 1, 1)
             )
             btn_dl = Button(
                 text="DOWNLOAD" if not has_local else "RE-DOWNLOAD",
-                font_size='11sp',
+                font_size='10sp',
                 bold=True,
-                size_hint_x=0.5,
+                size_hint_x=0.36,
                 background_normal='',
                 background_color=get_color_from_hex("#059669"),
+                color=(1, 1, 1, 1)
+            )
+            btn_save = Button(
+                text="SAVE",
+                font_size='10sp',
+                bold=True,
+                size_hint_x=0.26,
+                background_normal='',
+                background_color=get_color_from_hex("#2563eb"),
                 color=(1, 1, 1, 1)
             )
 
@@ -4457,12 +4462,17 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             def _start_download(btn_inst, m=msg, r=btn_row, meta=lbl_meta):
                 btn_dl.disabled = True
                 btn_dl.text = "Downloading..."
-                self.download_and_handle_file(m, is_preview=False, on_complete_open=False, btn_row=r, meta_lbl=meta)
+                self.download_and_handle_file(m, is_preview=False, is_save_action=False, on_complete_open=False, btn_row=r, meta_lbl=meta)
+
+            def _start_save(btn_inst, m=msg, r=btn_row, meta=lbl_meta):
+                self.save_file_to_device(m, btn_row=r, meta_lbl=meta)
 
             btn_view.bind(on_release=_start_view)
             btn_dl.bind(on_release=_start_download)
+            btn_save.bind(on_release=_start_save)
             btn_row.add_widget(btn_view)
             btn_row.add_widget(btn_dl)
+            btn_row.add_widget(btn_save)
             card.add_widget(btn_row)
 
             c_height = dp(38) + dp(38) + dp(14)
@@ -4657,13 +4667,23 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             return
         if self.chat_engine:
             try:
-                msg_obj = self.chat_engine.send_file(file_path, caption=caption)
+                r_id = (self.active_dm_peer.get("id", "") if self.active_dm_peer else "") or ""
+                r_name = (self.active_dm_peer.get("user_name", "") if self.active_dm_peer else "") or ""
+                msg_obj = self.chat_engine.send_file(
+                    file_path,
+                    caption=caption,
+                    recipient_id=r_id,
+                    recipient_name=r_name
+                )
                 if msg_obj:
                     fn = os.path.basename(file_path)
                     f_id = msg_obj.get("file_id")
                     if f_id:
                         self.downloaded_files[f_id] = file_path
-                    self.show_popup("File Shared", f"File '{fn}' broadcast to LAN team!")
+                    if r_id:
+                        self.show_popup("File Shared", f"File '{fn}' sent privately to {r_name}!")
+                    else:
+                        self.show_popup("File Shared", f"File '{fn}' broadcast to LAN team!")
                     Clock.schedule_once(lambda dt: self.scroll_chat_to_bottom(), 0.05)
                 else:
                     self.show_popup("Error", "Could not send file.")
@@ -4773,7 +4793,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
         # Bottom Buttons
         btn_row = BoxLayout(orientation='horizontal', size_hint_y=None, height=dp(44), spacing=dp(8))
-        popup = Popup(title="Share File with Team", content=content, size_hint=(0.96, 0.88))
+        dm_target_name = (self.active_dm_peer.get("user_name", "") if self.active_dm_peer else "") or ""
+        pop_title = f"🔒 Send File to {dm_target_name} (Private)" if dm_target_name else "Share File with Public Team Room"
+        popup = Popup(title=pop_title, content=content, size_hint=(0.96, 0.88))
 
         if is_android():
             def _on_system_picker_click(x):
@@ -4816,7 +4838,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     sz_str = ""
                 b_info = self.get_file_type_badge(fn)
                 lbl_selected.text = f"[{b_info['icon_txt']}] Selected: [b]{safe_escape_markup(fn)}[/b] ({sz_str})"
-                btn_send.text = f"Send [{b_info['icon_txt']}] '{fn[:14]}...'" if len(fn) > 14 else f"Send [{b_info['icon_txt']}] '{fn}'"
+                dest_lbl = f" to {dm_target_name}" if dm_target_name else ""
+                short_fn = fn[:12] + "..." if len(fn) > 12 else fn
+                btn_send.text = f"Send [{b_info['icon_txt']}] '{short_fn}'{dest_lbl}"
                 btn_send.background_color = get_color_from_hex("#10b981")
 
         filechooser.bind(selection=_on_selection_change)
@@ -4847,7 +4871,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             self._send_picked_file(chosen_file, caption=cap_text)
 
         btn_send = Button(
-            text="Send File",
+            text=f"Send to {dm_target_name}" if dm_target_name else "Send to Team",
             font_size='13sp',
             background_normal='',
             background_color=get_color_from_hex("#059669"),
@@ -4942,7 +4966,174 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             c_p = os.path.join(self.get_preview_cache_dir(), fn)
             if os.path.isfile(c_p):
                 return c_p
+            # 6. Check public Download dir
+            pub_p = os.path.join(self.get_public_download_dir(), fn)
+            if os.path.isfile(pub_p):
+                return pub_p
         return None
+
+    def get_public_download_dir(self):
+        """Returns the public device Downloads directory accessible in Files/Gallery."""
+        if is_android():
+            try:
+                from jnius import autoclass
+                Environment = autoclass('android.os.Environment')
+                pub_dl = Environment.getExternalStoragePublicDirectory(Environment.DIRECTORY_DOWNLOADS)
+                if pub_dl and pub_dl.exists():
+                    return pub_dl.getAbsolutePath()
+            except Exception:
+                pass
+            for d in ("/storage/emulated/0/Download", "/sdcard/Download", "/storage/emulated/0/Movies", "/sdcard/Movies"):
+                if os.path.isdir(d):
+                    return d
+        dl = os.path.join(os.path.expanduser("~"), "Downloads")
+        if os.path.isdir(dl):
+            return dl
+        return self.get_best_download_dir()
+
+    def scan_file_to_system_media(self, filepath):
+        """Notifies Android MediaScanner so new videos/images appear in Gallery and media players immediately."""
+        if is_android() and filepath and os.path.isfile(filepath):
+            try:
+                from jnius import autoclass
+                MediaScannerConnection = autoclass('android.media.MediaScannerConnection')
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                MediaScannerConnection.scanFile(PythonActivity.mActivity, [filepath], None, None)
+            except Exception as e:
+                print(f"MediaScanner scanFile error: {e}")
+
+    def share_file_to_system(self, filepath):
+        """Opens Android system Share/Save sheet or desktop file manager."""
+        if not filepath or not os.path.isfile(filepath):
+            return False
+        if is_android():
+            try:
+                from jnius import autoclass, cast
+                PythonActivity = autoclass('org.kivy.android.PythonActivity')
+                activity = PythonActivity.mActivity
+                Intent = autoclass('android.content.Intent')
+                Uri = autoclass('android.net.Uri')
+                File = autoclass('java.io.File')
+                String = autoclass('java.lang.String')
+
+                try:
+                    StrictMode = autoclass('android.os.StrictMode')
+                    VmPolicyBuilder = autoclass('android.os.StrictMode$VmPolicy$Builder')
+                    StrictMode.setVmPolicy(VmPolicyBuilder().build())
+                except Exception:
+                    pass
+
+                file_obj = File(filepath)
+                uri = Uri.fromFile(file_obj)
+
+                import mimetypes
+                mime_type, _ = mimetypes.guess_type(filepath)
+                if not mime_type:
+                    ext = os.path.splitext(filepath)[1].lower()
+                    if ext in ('.mp4', '.mkv', '.avi', '.mov', '.3gp'):
+                        mime_type = 'video/*'
+                    elif ext in ('.jpg', '.jpeg', '.png', '.webp', '.gif'):
+                        mime_type = 'image/*'
+                    elif ext in ('.mp3', '.wav', '.m4a', '.ogg', '.opus'):
+                        mime_type = 'audio/*'
+                    else:
+                        mime_type = '*/*'
+
+                intent = Intent(Intent.ACTION_SEND)
+                intent.setType(mime_type)
+                intent.putExtra(Intent.EXTRA_STREAM, uri)
+                intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+
+                title_cs = cast('java.lang.CharSequence', String(f"Save / Share '{os.path.basename(filepath)}'"))
+                chooser = Intent.createChooser(intent, title_cs)
+                chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                activity.startActivity(chooser)
+                return True
+            except Exception as e:
+                print(f"Share file error: {e}")
+                return False
+        return True
+
+    def save_file_to_device(self, msg, saved_path=None, btn_row=None, meta_lbl=None):
+        """Saves / exports the shared file directly into the device's public Downloads / Gallery."""
+        file_name = msg.get("file_name", "downloaded_file")
+        file_id = msg.get("file_id", "")
+
+        # 1. Resolve local file path
+        if not saved_path or not os.path.isfile(saved_path):
+            saved_path = self.get_file_local_path(msg)
+
+        # 2. If file is not yet downloaded, download it first, then save to device
+        if not saved_path or not os.path.isfile(saved_path):
+            if btn_row:
+                for child in btn_row.children:
+                    child.disabled = True
+                    if "save" in child.text.lower():
+                        child.text = "Saving..."
+
+            def _on_save_download_done(p):
+                self.save_file_to_device(msg, saved_path=p, btn_row=btn_row, meta_lbl=meta_lbl)
+
+            self.download_and_handle_file(
+                msg,
+                is_preview=False,
+                is_save_action=True,
+                on_complete_open=False,
+                btn_row=btn_row,
+                meta_lbl=meta_lbl,
+                custom_on_done=_on_save_download_done
+            )
+            return
+
+        # 3. File exists locally: copy to Public Downloads
+        try:
+            pub_dir = self.get_public_download_dir()
+            os.makedirs(pub_dir, exist_ok=True)
+            dest_path = os.path.join(pub_dir, file_name)
+
+            if os.path.abspath(saved_path) != os.path.abspath(dest_path):
+                import shutil
+                shutil.copy2(saved_path, dest_path)
+            else:
+                dest_path = saved_path
+
+            # 4. Scan to Android Gallery / MediaStore so Videos/Music/Photos show it
+            self.scan_file_to_system_media(dest_path)
+
+            # 5. Update state
+            if file_id:
+                self.downloaded_files[file_id] = dest_path
+            msg["saved_path"] = dest_path
+            msg["local_path"] = dest_path
+
+            if meta_lbl:
+                f_sz = os.path.getsize(dest_path) if os.path.isfile(dest_path) else msg.get("file_size", 0)
+                meta_lbl.text = f"[color=#10b981][b]SAVED[/b][/color]  [color=#94a3b8]{format_file_size(f_sz)}[/color]"
+
+            # 6. Reset button states if btn_row is provided
+            if btn_row:
+                for child in btn_row.children:
+                    child.disabled = False
+                    if "saving" in child.text.lower() or "save" in child.text.lower():
+                        child.text = "SAVE"
+
+            # 7. Open system share / save sheet
+            self.share_file_to_system(dest_path)
+
+            # 8. Show friendly popup
+            self.show_popup(
+                "Saved Successfully!",
+                f"File saved to your device!\n\n'{file_name}'\n\nLocation:\n{dest_path}\n\nVisible in Gallery, Videos & Downloads."
+            )
+        except Exception as e:
+            print(f"Save file to device error: {e}")
+            if btn_row:
+                for child in btn_row.children:
+                    child.disabled = False
+                    if "saving" in child.text.lower():
+                        child.text = "SAVE"
+            self.show_popup("Save Notice", f"File is located at:\n{saved_path}\n\nError copying to Downloads: {e}")
 
     def open_file_externally(self, filepath):
         """Opens any file in its default external viewer on Android or Desktop."""
@@ -5182,7 +5373,7 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                 btn_row.children[1].text = "Loading..."
         self.download_and_handle_file(msg, is_preview=True, on_complete_open=True, btn_row=btn_row, meta_lbl=meta_lbl)
 
-    def download_and_handle_file(self, msg, is_preview=False, on_complete_open=False, btn_row=None, meta_lbl=None):
+    def download_and_handle_file(self, msg, is_preview=False, is_save_action=False, on_complete_open=False, btn_row=None, meta_lbl=None, custom_on_done=None):
         if not self.chat_engine:
             self.show_popup("Notice", "LAN Chat engine is not active.")
             return
@@ -5196,9 +5387,27 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
             cur_s = format_file_size(cur)
             def _update_ui(dt):
                 if btn_row and len(btn_row.children) > 0:
-                    prefix = "Loading" if is_preview else "Saving"
-                    btn = btn_row.children[0] if not is_preview else btn_row.children[-1]
-                    btn.text = f"{prefix} {pct}% ({cur_s})"
+                    prefix = "Loading" if is_preview else ("Saving" if is_save_action else "Downloading")
+                    target_btn = None
+                    if is_preview:
+                        for c in btn_row.children:
+                            if any(k in c.text.lower() for k in ("play", "view", "open", "loading")):
+                                target_btn = c
+                                break
+                    elif is_save_action:
+                        for c in btn_row.children:
+                            if any(k in c.text.lower() for k in ("save", "saving")):
+                                target_btn = c
+                                break
+                    else:
+                        for c in btn_row.children:
+                            if any(k in c.text.lower() for k in ("download", "re-download", "downloading")):
+                                target_btn = c
+                                break
+                    if not target_btn and len(btn_row.children) > 0:
+                        target_btn = btn_row.children[0]
+                    if target_btn:
+                        target_btn.text = f"{prefix} {pct}% ({cur_s})"
             Clock.schedule_once(_update_ui, 0)
 
         def _on_done(saved_path):
@@ -5217,13 +5426,13 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     ext_l = os.path.splitext(file_name)[1].lower()
                     is_v = ext_l in ('.mp4', '.mkv', '.avi', '.mov', '.3gp', '.webm', '.ts', '.m4v')
                     is_a = ext_l in ('.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.opus')
-                    v_txt = "PLAY VIDEO" if is_v else ("PLAY AUDIO" if is_a else "OPEN FILE")
+                    v_txt = "PLAY VIDEO" if is_v else ("PLAY AUDIO" if is_a else "OPEN / VIEW")
 
                     btn_open = Button(
                         text=v_txt,
-                        font_size='12sp',
+                        font_size='10sp',
                         bold=True,
-                        size_hint_x=0.5,
+                        size_hint_x=0.38,
                         background_normal='',
                         background_color=get_color_from_hex("#8b5cf6" if is_v or is_a else "#0284c7"),
                         color=(1, 1, 1, 1)
@@ -5232,9 +5441,9 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
 
                     btn_redl = Button(
                         text="RE-DOWNLOAD",
-                        font_size='12sp',
+                        font_size='10sp',
                         bold=True,
-                        size_hint_x=0.5,
+                        size_hint_x=0.36,
                         background_normal='',
                         background_color=get_color_from_hex("#059669"),
                         color=(1, 1, 1, 1)
@@ -5242,13 +5451,27 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
                     def _do_redl(x):
                         btn_redl.disabled = True
                         btn_redl.text = "Downloading..."
-                        self.download_and_handle_file(msg, is_preview=False, on_complete_open=False, btn_row=btn_row, meta_lbl=meta_lbl)
+                        self.download_and_handle_file(msg, is_preview=False, is_save_action=False, on_complete_open=False, btn_row=btn_row, meta_lbl=meta_lbl)
                     btn_redl.bind(on_release=_do_redl)
+
+                    btn_save_done = Button(
+                        text="SAVE",
+                        font_size='10sp',
+                        bold=True,
+                        size_hint_x=0.26,
+                        background_normal='',
+                        background_color=get_color_from_hex("#2563eb"),
+                        color=(1, 1, 1, 1)
+                    )
+                    btn_save_done.bind(on_release=lambda x, m=msg, p=saved_path, r=btn_row, meta=meta_lbl: self.save_file_to_device(m, saved_path=p, btn_row=r, meta_lbl=meta))
 
                     btn_row.add_widget(btn_open)
                     btn_row.add_widget(btn_redl)
+                    btn_row.add_widget(btn_save_done)
 
-                if on_complete_open:
+                if custom_on_done:
+                    custom_on_done(saved_path)
+                elif on_complete_open:
                     self.open_file_externally(saved_path)
                 else:
                     self.show_popup("Download Complete", f"File saved successfully!\n\n'{file_name}'\n\nLocation:\n{saved_path}")
@@ -5258,10 +5481,16 @@ class WorkPulseMobileApp(App if KIVY_AVAILABLE else object):
         def _on_err(err_msg):
             def _err_ui(dt):
                 if btn_row:
+                    ext_l = os.path.splitext(file_name)[1].lower()
+                    is_v = ext_l in ('.mp4', '.mkv', '.avi', '.mov', '.3gp', '.webm', '.ts', '.m4v')
+                    is_a = ext_l in ('.mp3', '.wav', '.m4a', '.ogg', '.flac', '.aac', '.opus')
                     for child in btn_row.children:
                         child.disabled = False
-                        if "view" in child.text.lower() or "play" in child.text.lower():
-                            child.text = "VIEW / PLAY"
+                        txt = child.text.lower()
+                        if any(k in txt for k in ("view", "play", "loading", "open")):
+                            child.text = "PLAY VIDEO" if is_v else ("PLAY AUDIO" if is_a else "OPEN / VIEW")
+                        elif any(k in txt for k in ("save", "saving")):
+                            child.text = "SAVE"
                         else:
                             child.text = "DOWNLOAD"
                 self.show_popup("Download Failed", f"Could not load '{file_name}':\n{err_msg}")

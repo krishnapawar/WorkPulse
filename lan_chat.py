@@ -3854,8 +3854,8 @@ class LANChatDialog:
             text = ""
         reply_to = self.active_reply
 
-        recipient_id = self.active_dm_peer["id"] if self.active_dm_peer else ""
-        recipient_name = self.active_dm_peer["user_name"] if self.active_dm_peer else ""
+        recipient_id = self.active_dm_peer.get("id", "") if self.active_dm_peer else ""
+        recipient_name = self.active_dm_peer.get("user_name", "") if self.active_dm_peer else ""
 
         if self.pending_image:
             img_info = self.pending_image
@@ -4045,8 +4045,8 @@ class LANChatDialog:
         except Exception:
             pass
 
-        recipient_id = self.active_dm_peer["id"] if self.active_dm_peer else ""
-        recipient_name = self.active_dm_peer["user_name"] if self.active_dm_peer else ""
+        recipient_id = self.active_dm_peer.get("id", "") if self.active_dm_peer else ""
+        recipient_name = self.active_dm_peer.get("user_name", "") if self.active_dm_peer else ""
         self.engine.send_file(file_path, recipient_id=recipient_id, recipient_name=recipient_name)
 
     def _share_today_tasks_to_chat(self):
@@ -4509,8 +4509,8 @@ class LANChatDialog:
             if len(cleaned) < 2:
                 messagebox.showwarning("Incomplete", "Please enter at least 2 non-empty options.", parent=win)
                 return
-            recip_id = self.active_dm_peer["id"] if self.active_dm_peer else ""
-            recip_name = self.active_dm_peer["user_name"] if self.active_dm_peer else ""
+            recip_id = self.active_dm_peer.get("id", "") if self.active_dm_peer else ""
+            recip_name = self.active_dm_peer.get("user_name", "") if self.active_dm_peer else ""
             self.engine.create_poll(q, cleaned, recipient_id=recip_id, recipient_name=recip_name)
             win.destroy()
 
@@ -4558,7 +4558,7 @@ class LANChatDialog:
             bg="#1e293b"
         ).pack(anchor="w", pady=(0, 4))
 
-        channel_desc = f"Direct Message with {self.active_dm_peer['user_name']}" if self.active_dm_peer else "# team-general (All Colleagues)"
+        channel_desc = f"Direct Message with {self.active_dm_peer.get('user_name', 'Colleague')}" if self.active_dm_peer else "# team-general (All Colleagues)"
         tk.Label(
             content,
             text=f"Broadcast to: {channel_desc}",
@@ -4653,7 +4653,7 @@ class LANChatDialog:
         # Scope
         tk.Label(content, text="Export Scope:", font=font_spec(11, "bold"), fg="#cbd5e1", bg="#1e293b").pack(anchor="w", pady=(4, 2))
         scope_var = tk.StringVar(value="channel")
-        cur_chan = f"Current Channel ({self.active_dm_peer['user_name'] if self.active_dm_peer else '# team-general'})"
+        cur_chan = f"Current Channel ({self.active_dm_peer.get('user_name', 'Colleague') if self.active_dm_peer else '# team-general'})"
         tk.Radiobutton(content, text=cur_chan, variable=scope_var, value="channel", font=font_spec(11), bg="#1e293b", fg="#ffffff", selectcolor="#0f172a", activebackground="#1e293b", activeforeground="#ffffff").pack(anchor="w", padx=20)
         tk.Radiobutton(content, text="All Messages (Entire SQLite Database)", variable=scope_var, value="all", font=font_spec(11), bg="#1e293b", fg="#ffffff", selectcolor="#0f172a", activebackground="#1e293b", activeforeground="#ffffff").pack(anchor="w", padx=20)
 
@@ -4701,7 +4701,7 @@ class LANChatDialog:
             if not dest:
                 return
 
-            chan_label = self.active_dm_peer["user_name"] if self.active_dm_peer else "# team-general"
+            chan_label = self.active_dm_peer.get("user_name", "Colleague") if self.active_dm_peer else "# team-general"
             ok = export_chat_history(filtered, dest, format_type=chosen_fmt, channel_name=chan_label)
             if ok:
                 win.destroy()
